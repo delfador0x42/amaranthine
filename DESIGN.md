@@ -14,7 +14,7 @@ one command to store, one to search, one to orient at session start.
 ## Data Flow
 `store` → append timestamped entry to `<topic>.md` (warns on duplicates, stdin via -)
 `append` → add text to last entry (no new timestamp, for related follow-ups)
-`search` → case-insensitive substring, return matching sections (--brief: topic + first hit)
+`search` → case-insensitive substring, return matching sections (--brief, --count, --limit N)
 `context` → combined topics + recent + optional search (--brief: topics only)
 `delete` → remove last entry (--last), by match (--match), or entire topic (--all)
 `edit` → replace matching entry content in-place (keeps timestamp)
@@ -40,20 +40,24 @@ one command to store, one to search, one to orient at session start.
 - `append` adds to last entry (no timestamp) — prevents topic clutter for related info
 - Dupe detection on `store`: 60%+ word overlap triggers warning (still stores)
 - `context --brief`: topics only, no recent — fast orientation for quick tasks
+- `topics` shows preview of most recent entry — instant content orientation
+- `search --limit N`: cap results to prevent context flooding
+- `search --count` / `search_count` MCP tool: gauge scope before full search
+- `_reload` MCP tool: exec() replaces server process, sends tools/list_changed
 
 ## Key Files
 - `src/main.rs` — CLI entry, manual arg parsing
 - `src/json.rs` — recursive descent JSON parser + pretty printer
-- `src/mcp.rs` — MCP server: stdio loop, 14 tools, in-process dispatch
+- `src/mcp.rs` — MCP server: stdio loop, 16 tools, in-process dispatch + exec reload
 - `src/install.rs` — self-install to ~/.claude.json + CLAUDE.md
 - `src/time.rs` — libc FFI (localtime_r), Hinnant date algorithm
 - `src/config.rs` — path resolution, sanitization, file listing
 - `src/context.rs` — session orientation (topics + recent + search)
 - `src/store.rs` — timestamped entry append + append-to-last + dupe detection
-- `src/search.rs` — section-based substring search
+- `src/search.rs` — section-based substring search + count + limit
 - `src/delete.rs` — entry/topic removal + split_sections parser
 - `src/edit.rs` — in-place entry replacement + match-based append
 - `src/digest.rs` — compact summary generator
 - `src/index.rs` — manifest generation
-- `src/topics.rs` — list + recent entries
+- `src/topics.rs` — list (with preview) + recent entries
 - `src/prune.rs` — staleness detection

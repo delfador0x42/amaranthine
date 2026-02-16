@@ -6,6 +6,18 @@ pub fn run(dir: &Path) -> Result<(), String> {
     let stdin = io::stdin();
     let stdout = io::stdout();
 
+    // After re-exec, notify client that tools may have changed
+    if std::env::var("AMARANTHINE_REEXEC").is_ok() {
+        std::env::remove_var("AMARANTHINE_REEXEC");
+        let notif = Value::Obj(vec![
+            ("jsonrpc".into(), Value::Str("2.0".into())),
+            ("method".into(), Value::Str("notifications/tools/list_changed".into())),
+        ]);
+        let mut out = stdout.lock();
+        let _ = writeln!(out, "{notif}");
+        let _ = out.flush();
+    }
+
     for line in stdin.lock().lines() {
         let line = line.map_err(|e| e.to_string())?;
         if line.is_empty() { continue; }
@@ -15,6 +27,22 @@ pub fn run(dir: &Path) -> Result<(), String> {
         };
         let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
         let id = msg.get("id");
+
+        // Handle _reload specially — must exec after responding
+        if method == "tools/call" {
+            let p = msg.get("params");
+            let name = p.and_then(|p| p.get("name")).and_then(|v| v.as_str()).unwrap_or("");
+            if name == "_reload" {
+                let resp = rpc_ok(id, content_result("reloading amaranthine..."));
+                let mut out = stdout.lock();
+                let _ = writeln!(out, "{resp}");
+                let _ = out.flush();
+                drop(out);
+                do_reload();
+                // exec only returns on failure — keep running
+                continue;
+            }
+        }
 
         let resp = match method {
             "initialize" => Some(rpc_ok(id, init_result())),
@@ -44,6 +72,21 @@ pub fn run(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn do_reload() {
+    use std::os::unix::process::CommandExt;
+    std::env::set_var("AMARANTHINE_REEXEC", "1");
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // exec replaces this process — only returns on failure
+    let _err = std::process::Command::new(&exe).args(&args).exec();
+    // If we get here, exec failed — remove env var and continue
+    std::env::remove_var("AMARANTHINE_REEXEC");
+    eprintln!("reload failed: {_err}");
+}
+
 fn init_result() -> Value {
     Value::Obj(vec![
         ("protocolVersion".into(), Value::Str("2024-11-05".into())),
@@ -52,7 +95,7 @@ fn init_result() -> Value {
         ])),
         ("serverInfo".into(), Value::Obj(vec![
             ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("0.5.0".into())),
+            ("version".into(), Value::Str("0.6.0".into())),
         ])),
     ])
 }
@@ -116,8 +159,13 @@ fn tool_list() -> Value {
               ("text", "string", "Text to append")]),
         tool("search", "Search all knowledge files (case-insensitive, returns full sections)",
             &["query"],
-            &[("query", "string", "Search query")]),
+            &[("query", "string", "Search query"),
+              ("limit", "string", "Max results to return (default: unlimited)")]),
         tool("search_brief", "Quick search: just topic names + first matching line per hit",
+            &["query"],
+            &[("query", "string", "Search query"),
+              ("limit", "string", "Max results to return (default: unlimited)")]),
+        tool("search_count", "Count matching sections without returning content. Fast way to gauge query scope.",
             &["query"],
             &[("query", "string", "Search query")]),
         tool("context", "Session briefing: topics + recent entries (7 days) + optional search",
@@ -151,6 +199,8 @@ fn tool_list() -> Value {
             &[("topic", "string", "Topic name")]),
         tool("digest", "Compact summary of all topics (one bullet per entry)",
             &[], &[]),
+        tool("_reload", "Re-exec the server binary to pick up code changes. Sends tools/list_changed notification after reload.",
+            &[], &[]),
     ])
 }
 
@@ -168,11 +218,17 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
         }
         "search" => {
             let query = arg_str(args, "query");
-            crate::search::run(dir, &query, true)
+            let limit = arg_str(args, "limit").parse::<usize>().ok();
+            crate::search::run(dir, &query, true, limit)
         }
         "search_brief" => {
             let query = arg_str(args, "query");
-            crate::search::run_brief(dir, &query)
+            let limit = arg_str(args, "limit").parse::<usize>().ok();
+            crate::search::run_brief(dir, &query, limit)
+        }
+        "search_count" => {
+            let query = arg_str(args, "query");
+            crate::search::count(dir, &query)
         }
         "context" => {
             let q = arg_str(args, "query");

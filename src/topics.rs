@@ -19,10 +19,30 @@ pub fn list(dir: &Path) -> Result<String, String> {
         let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
         let name = path.file_stem().unwrap().to_string_lossy();
         let entries = content.lines().filter(|l| l.starts_with("## ")).count();
-        let lines = content.lines().count();
-        let _ = writeln!(out, "  {name:<24} {entries:>3} entries  {lines:>4} lines");
+        let preview = last_entry_preview(&content);
+        let _ = writeln!(out, "  {name:<24} {entries:>3} entries  | {preview}");
     }
     Ok(out)
+}
+
+fn last_entry_preview(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let last_header = lines.iter().rposition(|l| l.starts_with("## "));
+    if let Some(idx) = last_header {
+        for line in &lines[idx + 1..] {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                let clean = trimmed.trim_start_matches("- ");
+                if clean.len() > 60 {
+                    let mut end = 60;
+                    while end > 0 && !clean.is_char_boundary(end) { end -= 1; }
+                    return format!("{}...", &clean[..end]);
+                }
+                return clean.to_string();
+            }
+        }
+    }
+    "(empty)".to_string()
 }
 
 pub fn recent(dir: &Path, days: u64, plain: bool) -> Result<String, String> {
