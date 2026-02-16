@@ -1,10 +1,8 @@
 use crate::json::Value;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Write as _};
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 pub fn run(dir: &Path) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let stdin = io::stdin();
     let stdout = io::stdout();
 
@@ -28,7 +26,7 @@ pub fn run(dir: &Path) -> Result<(), String> {
                 let p = msg.get("params");
                 let name = p.and_then(|p| p.get("name")).and_then(|v| v.as_str()).unwrap_or("");
                 let args = p.and_then(|p| p.get("arguments"));
-                Some(match dispatch(name, args, dir, &exe) {
+                Some(match dispatch(name, args, dir) {
                     Ok(text) => rpc_ok(id, content_result(&text)),
                     Err(e) => rpc_err(id, -32603, &e),
                 })
@@ -143,68 +141,52 @@ fn tool_list() -> Value {
     ])
 }
 
-fn dispatch(name: &str, args: Option<&Value>, dir: &Path, exe: &Path) -> Result<String, String> {
-    // read_topic: direct file read, no subprocess needed
-    if name == "read_topic" {
-        let topic = arg_str(args, "topic");
-        let f = crate::config::sanitize_topic(&topic);
-        return std::fs::read_to_string(dir.join(format!("{f}.md")))
-            .map_err(|e| format!("{f}.md: {e}"));
-    }
-
-    let d = dir.to_string_lossy().into_owned();
-    let mut cli: Vec<String> = vec!["--plain".into(), "-d".into(), d];
-
+fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, String> {
     match name {
-        "store" => cli.extend(["store".into(), arg_str(args, "topic"), arg_str(args, "text")]),
-        "search" => cli.extend(["search".into(), arg_str(args, "query")]),
-        "context" => {
-            cli.push("context".into());
-            let q = arg_str(args, "query");
-            if !q.is_empty() { cli.push(q); }
+        "store" => {
+            let topic = arg_str(args, "topic");
+            let text = arg_str(args, "text");
+            crate::store::run(dir, &topic, &text)
         }
-        "topics" => cli.push("topics".into()),
+        "search" => {
+            let query = arg_str(args, "query");
+            crate::search::run(dir, &query, true)
+        }
+        "context" => {
+            let q = arg_str(args, "query");
+            let q = if q.is_empty() { None } else { Some(q.as_str()) };
+            crate::context::run(dir, q, true)
+        }
+        "topics" => crate::topics::list(dir),
         "recent" => {
-            cli.push("recent".into());
             let d = arg_str(args, "days");
-            if !d.is_empty() { cli.push(d); }
+            let days = d.parse().unwrap_or(7u64);
+            crate::topics::recent(dir, days, true)
         }
         "delete_entry" => {
+            let topic = arg_str(args, "topic");
             let m = arg_str(args, "match_str");
-            cli.extend(["delete".into(), arg_str(args, "topic")]);
-            if m.is_empty() {
-                cli.push("--last".into());
-            } else {
-                cli.extend(["--match".into(), m]);
-            }
+            let match_str = if m.is_empty() { None } else { Some(m.as_str()) };
+            crate::delete::run(dir, &topic, match_str.is_none(), false, match_str)
         }
-        "delete_topic" => cli.extend(["delete".into(), arg_str(args, "topic"), "--all".into()]),
+        "delete_topic" => {
+            let topic = arg_str(args, "topic");
+            crate::delete::run(dir, &topic, false, true, None)
+        }
         "update_entry" => {
-            cli.extend([
-                "edit".into(), arg_str(args, "topic"),
-                "--match".into(), arg_str(args, "match_str"),
-                arg_str(args, "text"),
-            ]);
+            let topic = arg_str(args, "topic");
+            let needle = arg_str(args, "match_str");
+            let text = arg_str(args, "text");
+            crate::edit::run(dir, &topic, &needle, &text)
         }
-        "digest" => cli.push("digest".into()),
-        _ => return Err(format!("unknown tool: {name}")),
-    }
-
-    let out = Command::new(exe)
-        .args(&cli)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        let err = String::from_utf8_lossy(&out.stderr);
-        Err(if err.is_empty() {
-            String::from_utf8_lossy(&out.stdout).into_owned()
-        } else {
-            err.into_owned()
-        })
+        "read_topic" => {
+            let topic = arg_str(args, "topic");
+            let f = crate::config::sanitize_topic(&topic);
+            std::fs::read_to_string(dir.join(format!("{f}.md")))
+                .map_err(|e| format!("{f}.md: {e}"))
+        }
+        "digest" => crate::digest::run(dir),
+        _ => Err(format!("unknown tool: {name}")),
     }
 }
 

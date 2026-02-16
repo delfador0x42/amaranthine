@@ -3,7 +3,7 @@ use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
-pub fn run(dir: &Path, topic: &str, text: &str) -> Result<(), String> {
+pub fn run(dir: &Path, topic: &str, text: &str) -> Result<String, String> {
     crate::config::ensure_dir(dir)?;
 
     let text = if text == "-" {
@@ -36,8 +36,7 @@ pub fn run(dir: &Path, topic: &str, text: &str) -> Result<(), String> {
     writeln!(file, "{text}\n").map_err(|e| e.to_string())?;
 
     let count = count_entries(&filepath);
-    println!("stored in {filename}.md ({count} entries)");
-    Ok(())
+    Ok(format!("stored in {filename}.md ({count} entries)"))
 }
 
 fn count_entries(path: &Path) -> usize {

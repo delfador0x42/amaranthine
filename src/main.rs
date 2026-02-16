@@ -52,7 +52,7 @@ fn main() {
     let dir = config::resolve_dir(dir_override);
     let cmd = &args[cmd_start..];
 
-    let result = match cmd.first().map(|s| s.as_str()) {
+    let result: Result<String, String> = match cmd.first().map(|s| s.as_str()) {
         Some("store") if cmd.len() >= 3 => store::run(&dir, &cmd[1], &cmd[2..].join(" ")),
         Some("store") if cmd.len() == 2 => store::run(&dir, &cmd[1], "-"),
         Some("store") => Err("usage: store <topic> <text|-> (- reads stdin)".into()),
@@ -73,7 +73,6 @@ fn main() {
             let match_str = parse_flag_str(cmd, "--match");
             match match_str {
                 Some(needle) => {
-                    // Collect text after --match <val>
                     let mi = cmd.iter().position(|a| a == "--match").unwrap();
                     let text_parts: Vec<&str> = cmd.iter().enumerate()
                         .filter(|(i, a)| *i != 0 && *i != 1 && *i != mi && *i != mi + 1 && !a.is_empty())
@@ -104,17 +103,17 @@ fn main() {
             let d = if cmd.len() >= 3 && (cmd[1] == "--dir" || cmd[1] == "-d") {
                 std::path::PathBuf::from(&cmd[2])
             } else { dir.clone() };
-            mcp::run(&d)
+            mcp::run(&d).map(|()| String::new())
         }
-        Some("install") => install::run(&dir),
-        Some("init") => config::init(cmd.get(1).map(|s| s.as_str())),
-        Some("help") | None => { print_help(); Ok(()) }
+        Some("install") => install::run(&dir).map(|()| String::new()),
+        Some("init") => config::init(cmd.get(1).map(|s| s.as_str())).map(|()| String::new()),
+        Some("help") | None => { print_help(); Ok(String::new()) }
         Some(c) => Err(format!("unknown command: {c}")),
     };
 
-    if let Err(e) = result {
-        eprintln!("error: {e}");
-        std::process::exit(1);
+    match result {
+        Ok(msg) => { if !msg.is_empty() { print!("{msg}"); } }
+        Err(e) => { eprintln!("error: {e}"); std::process::exit(1); }
     }
 }
 

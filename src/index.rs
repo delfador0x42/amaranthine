@@ -2,7 +2,7 @@ use crate::time::LocalTime;
 use std::fs;
 use std::path::Path;
 
-pub fn run(dir: &Path) -> Result<(), String> {
+pub fn run(dir: &Path) -> Result<String, String> {
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
     }
@@ -36,7 +36,6 @@ pub fn run(dir: &Path) -> Result<(), String> {
 
     let index_path = dir.join("INDEX.md");
     fs::write(&index_path, &out).map_err(|e| e.to_string())?;
-    print!("{out}");
-    println!("\nwritten to {}", index_path.display());
-    Ok(())
+    out += &format!("\nwritten to {}", index_path.display());
+    Ok(out)
 }

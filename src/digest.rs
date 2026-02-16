@@ -1,17 +1,18 @@
+use std::fmt::Write;
 use std::fs;
 use std::path::Path;
 
-pub fn run(dir: &Path) -> Result<(), String> {
+pub fn run(dir: &Path) -> Result<String, String> {
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
     }
 
     let files = crate::config::list_topic_files(dir)?;
     if files.is_empty() {
-        println!("no topics");
-        return Ok(());
+        return Ok("no topics".into());
     }
 
+    let mut out = String::new();
     for (i, path) in files.iter().enumerate() {
         let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
         let name = path.file_stem().unwrap().to_string_lossy();
@@ -32,8 +33,8 @@ pub fn run(dir: &Path) -> Result<(), String> {
             .map(|h| h.trim_start_matches("## "))
             .unwrap_or("empty");
 
-        if i > 0 { println!(); }
-        println!("### {title} ({count} entries, last: {latest})");
+        if i > 0 { let _ = writeln!(out); }
+        let _ = writeln!(out, "### {title} ({count} entries, last: {latest})");
 
         // First non-empty content line per section = summary bullet
         let mut in_section = false;
@@ -45,14 +46,14 @@ pub fn run(dir: &Path) -> Result<(), String> {
             } else if in_section && !got_summary && !line.is_empty() {
                 let trimmed = line.trim_start_matches("- ").trim();
                 if !trimmed.is_empty() {
-                    println!("- {}", truncate(trimmed, 100));
+                    let _ = writeln!(out, "- {}", truncate(trimmed, 100));
                     got_summary = true;
                 }
             }
         }
     }
 
-    Ok(())
+    Ok(out)
 }
 
 fn truncate(s: &str, max: usize) -> &str {

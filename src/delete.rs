@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-pub fn run(dir: &Path, topic: &str, last: bool, all: bool, match_str: Option<&str>) -> Result<(), String> {
+pub fn run(dir: &Path, topic: &str, last: bool, all: bool, match_str: Option<&str>) -> Result<String, String> {
     let filename = crate::config::sanitize_topic(topic);
     let filepath = dir.join(format!("{filename}.md"));
 
@@ -11,8 +11,7 @@ pub fn run(dir: &Path, topic: &str, last: bool, all: bool, match_str: Option<&st
 
     if all {
         fs::remove_file(&filepath).map_err(|e| e.to_string())?;
-        println!("deleted {filename}.md");
-        return Ok(());
+        return Ok(format!("deleted {filename}.md"));
     }
 
     if let Some(needle) = match_str {
@@ -29,14 +28,13 @@ pub fn run(dir: &Path, topic: &str, last: bool, all: bool, match_str: Option<&st
             let trimmed = content[..pos].trim_end();
             fs::write(&filepath, format!("{trimmed}\n")).map_err(|e| e.to_string())?;
             let remaining = trimmed.matches("\n## ").count();
-            println!("removed last entry from {filename}.md ({remaining} remaining)");
+            Ok(format!("removed last entry from {filename}.md ({remaining} remaining)"))
         }
-        None => return Err("no entries to remove".into()),
+        None => Err("no entries to remove".into()),
     }
-    Ok(())
 }
 
-fn delete_matching(filepath: &Path, filename: &str, needle: &str) -> Result<(), String> {
+fn delete_matching(filepath: &Path, filename: &str, needle: &str) -> Result<String, String> {
     let content = fs::read_to_string(filepath).map_err(|e| e.to_string())?;
     let sections = split_sections(&content);
     let lower = needle.to_lowercase();
@@ -47,32 +45,43 @@ fn delete_matching(filepath: &Path, filename: &str, needle: &str) -> Result<(), 
         None => return Err(format!("no entry matching \"{needle}\"")),
     };
 
-    let mut result = sections.iter().enumerate()
-        .filter(|(i, _)| *i != idx)
-        .map(|(_, (hdr, body))| format!("{hdr}\n{body}"))
-        .collect::<Vec<_>>()
-        .join("");
-
-    // Preserve the # title header if present
-    if let Some(title_end) = content.find("\n## ") {
-        let header = &content[..title_end + 1];
-        if !result.starts_with("# ") {
-            result = format!("{header}{result}");
-        }
-    }
-
-    if result.trim().lines().count() <= 1 {
-        // Only title left — just keep the title
-        let title = content.lines().next().unwrap_or("");
-        fs::write(filepath, format!("{title}\n\n")).map_err(|e| e.to_string())?;
-    } else {
-        if !result.ends_with('\n') { result.push('\n'); }
-        fs::write(filepath, &result).map_err(|e| e.to_string())?;
-    }
+    let result = rebuild_file(&content, &sections, Some(idx), None);
+    fs::write(filepath, &result).map_err(|e| e.to_string())?;
 
     let remaining = result.matches("\n## ").count();
-    println!("removed entry matching \"{needle}\" from {filename}.md ({remaining} remaining)");
-    Ok(())
+    Ok(format!("removed entry matching \"{needle}\" from {filename}.md ({remaining} remaining)"))
+}
+
+/// Rebuild a topic file from sections.
+/// `skip` = index to omit, `replace` = (index, new_body) to swap content.
+pub fn rebuild_file(
+    content: &str,
+    sections: &[(&str, &str)],
+    skip: Option<usize>,
+    replace: Option<(usize, &str)>,
+) -> String {
+    // Extract # title header
+    let title = content.lines().next().filter(|l| l.starts_with("# ")).unwrap_or("");
+    let mut result = format!("{title}\n");
+
+    for (i, (hdr, body)) in sections.iter().enumerate() {
+        if skip == Some(i) { continue; }
+        result.push('\n');
+        result.push_str(hdr);
+        result.push('\n');
+        if let Some((ri, new_body)) = replace {
+            if ri == i {
+                result.push_str(new_body);
+                result.push('\n');
+                continue;
+            }
+        }
+        // Original body: strip leading \n, keep content
+        let trimmed = body.strip_prefix('\n').unwrap_or(body);
+        result.push_str(trimmed);
+        if !result.ends_with('\n') { result.push('\n'); }
+    }
+    result
 }
 
 /// Split content into (header_line, body) pairs for each `## ` section.

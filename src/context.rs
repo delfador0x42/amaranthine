@@ -1,28 +1,31 @@
+use std::fmt::Write;
 use std::path::Path;
 
-pub fn run(dir: &Path, query: Option<&str>, plain: bool) -> Result<(), String> {
+pub fn run(dir: &Path, query: Option<&str>, plain: bool) -> Result<String, String> {
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
     }
 
-    section("Topics", plain);
-    crate::topics::list(dir)?;
+    let mut out = String::new();
 
-    section("Recent (7 days)", plain);
-    crate::topics::recent(dir, 7, plain)?;
+    section(&mut out, "Topics", plain);
+    out.push_str(&crate::topics::list(dir)?);
+
+    section(&mut out, "Recent (7 days)", plain);
+    out.push_str(&crate::topics::recent(dir, 7, plain)?);
 
     if let Some(q) = query {
-        section(&format!("Search: {q}"), plain);
-        crate::search::run(dir, q, plain)?;
+        section(&mut out, &format!("Search: {q}"), plain);
+        out.push_str(&crate::search::run(dir, q, plain)?);
     }
 
-    Ok(())
+    Ok(out)
 }
 
-fn section(title: &str, plain: bool) {
+fn section(out: &mut String, title: &str, plain: bool) {
     if plain {
-        println!("\n== {title} ==");
+        let _ = writeln!(out, "\n== {title} ==");
     } else {
-        println!("\n\x1b[1;35m== {title} ==\x1b[0m");
+        let _ = writeln!(out, "\n\x1b[1;35m== {title} ==\x1b[0m");
     }
 }

@@ -1,7 +1,8 @@
+use std::fmt::Write;
 use std::fs;
 use std::path::Path;
 
-pub fn run(dir: &Path, query: &str, plain: bool) -> Result<(), String> {
+pub fn run(dir: &Path, query: &str, plain: bool) -> Result<String, String> {
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
     }
@@ -9,6 +10,7 @@ pub fn run(dir: &Path, query: &str, plain: bool) -> Result<(), String> {
     let query_lower = query.to_lowercase();
     let files = crate::config::list_search_files(dir)?;
     let mut total = 0;
+    let mut out = String::new();
 
     for path in &files {
         let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
@@ -20,35 +22,35 @@ pub fn run(dir: &Path, query: &str, plain: bool) -> Result<(), String> {
             if section.iter().any(|l| l.to_lowercase().contains(&query_lower)) {
                 if !file_printed {
                     if plain {
-                        println!("\n--- {name} ---");
+                        let _ = writeln!(out, "\n--- {name} ---");
                     } else {
-                        println!("\n\x1b[1;36m--- {name} ---\x1b[0m");
+                        let _ = writeln!(out, "\n\x1b[1;36m--- {name} ---\x1b[0m");
                     }
                     file_printed = true;
                 }
                 for line in section {
                     if line.to_lowercase().contains(&query_lower) {
                         if plain {
-                            println!("> {line}");
+                            let _ = writeln!(out, "> {line}");
                         } else {
-                            println!("\x1b[1;33m{line}\x1b[0m");
+                            let _ = writeln!(out, "\x1b[1;33m{line}\x1b[0m");
                         }
                     } else {
-                        println!("{line}");
+                        let _ = writeln!(out, "{line}");
                     }
                 }
-                println!();
+                let _ = writeln!(out);
                 total += 1;
             }
         }
     }
 
     if total == 0 {
-        println!("no matches for '{query}'");
+        let _ = writeln!(out, "no matches for '{query}'");
     } else {
-        println!("{total} matching section(s)");
+        let _ = writeln!(out, "{total} matching section(s)");
     }
-    Ok(())
+    Ok(out)
 }
 
 fn parse_sections(content: &str) -> Vec<Vec<&str>> {
