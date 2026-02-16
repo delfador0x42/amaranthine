@@ -1,9 +1,23 @@
 #!/bin/bash
-# SessionStart hook: load amaranthine context at session start.
-# Outputs additionalContext that Claude sees as system context.
-CONTEXT=$(/Users/tal/wudan/dojo/crash3/amaranthine/target/release/amaranthine --plain -d /Users/tal/.amaranthine context --brief 2>/dev/null)
+# SessionStart: load amaranthine context + set session timestamp.
+AMR=/Users/tal/.local/bin/amaranthine
+
+# Write session start timestamp for session-scoped queries
+date +%s > /tmp/amaranthine-session-ts
+
+# Clear caches from previous session
+rm -f /tmp/amaranthine-miss-cache
+rm -f /tmp/amaranthine-hook-postedit.seen
+
+# Clear all hook debounce stamps
+rm -f /tmp/amaranthine-hook-global.last
+rm -f /tmp/amaranthine-hook-prompt.last
+rm -f /tmp/amaranthine-hook-file.last
+rm -f /tmp/amaranthine-hook-read.last
+rm -f /tmp/amaranthine-hook-stop.last
+
+CONTEXT=$("$AMR" --plain context --brief 2>/dev/null)
 if [ -n "$CONTEXT" ]; then
-  # Escape for JSON
   ESCAPED=$(echo "$CONTEXT" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
   echo "{\"hookSpecificOutput\":{\"additionalContext\":$ESCAPED}}"
 fi

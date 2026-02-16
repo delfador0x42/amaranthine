@@ -1,7 +1,20 @@
 #!/bin/bash
-# UserPromptSubmit hook: search amaranthine for knowledge relevant to user's prompt.
-# Injects matching entries as additionalContext so Claude sees them automatically.
+# UserPromptSubmit: search amaranthine for knowledge relevant to user's prompt.
+# Sets global debounce stamp so read/file hooks skip for 10s.
+STAMP=/tmp/amaranthine-hook-prompt.last
+GLOBAL=/tmp/amaranthine-hook-global.last
+NOW=$(date +%s)
+
+# Per-hook debounce: skip if fired <30s ago
+if [ -f "$STAMP" ]; then
+  LAST=$(cat "$STAMP" 2>/dev/null)
+  [ $((NOW - ${LAST:-0})) -lt 30 ] && exit 0
+fi
+echo "$NOW" > "$STAMP"
+
 INPUT=$(cat)
+AMR=/Users/tal/.local/bin/amaranthine
+
 PROMPT=$(echo "$INPUT" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -10,9 +23,10 @@ print(d.get('prompt', ''))
 
 [ -z "$PROMPT" ] && exit 0
 
-AMR=/Users/tal/.local/bin/amaranthine
+# Set global stamp — read/file hooks will skip for 10s
+echo "$NOW" > "$GLOBAL"
 
-# Extract keywords and do progressive search in one python call
+# Extract keywords and do progressive search
 RESULTS=$(echo "$PROMPT" | python3 -c "
 import sys, subprocess
 
@@ -29,7 +43,9 @@ stops = {'the','a','an','is','it','its','can','do','does','did','fix','add','mak
          'hello','bug','error','issue','problem','work','working','implement',
          'investigate','review','explore','analyze','understand','research','build',
          'test','debug','refactor','optimize','improve','write','read','find','search',
-         'figure','out','about','into','something','everything','anything','nothing'}
+         'figure','out','about','into','something','everything','anything','nothing',
+         'keep','going','continue','hell','rock','brother','man','hahahaha','haha',
+         'lol','cool','nice','great','awesome','perfect','good','done','right','totally'}
 
 words = sys.stdin.read().lower().split()
 kw = []
@@ -46,7 +62,6 @@ if not kw:
     sys.exit(0)
 
 amr = '$AMR'
-# Progressive: try all keywords, drop last each time until results found
 for drop in range(min(len(kw), 3)):
     query = ' '.join(kw[:len(kw)-drop])
     if not query:

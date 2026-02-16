@@ -1,13 +1,13 @@
 #!/bin/bash
-# Stop hook: remind Claude to store findings before finishing.
-# Must check stop_hook_active to prevent infinite loops.
-INPUT=$(cat)
-
-STOP_ACTIVE=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('stop_hook_active', False))" 2>/dev/null)
-
-if [ "$STOP_ACTIVE" = "True" ]; then
-  exit 0
+# Stop: remind to store findings before conversation ends.
+# Debounced at 120s to avoid repeated noise.
+STAMP=/tmp/amaranthine-hook-stop.last
+NOW=$(date +%s)
+if [ -f "$STAMP" ]; then
+  LAST=$(cat "$STAMP" 2>/dev/null)
+  [ $((NOW - ${LAST:-0})) -lt 120 ] && exit 0
 fi
+echo "$NOW" > "$STAMP"
 
-echo '{"decision":"block","reason":"BEFORE STOPPING: Review what you just did. If you discovered anything non-obvious (bug fix, gotcha, architectural insight, build issue, API behavior), store it NOW in amaranthine with an atomic entry. If nothing worth storing, proceed."}'
+echo '{"hookSpecificOutput":{"additionalContext":"STOPPING: Store any non-obvious findings in amaranthine before ending."}}'
 exit 0
