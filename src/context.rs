@@ -27,10 +27,12 @@ fn run_inner(dir: &Path, query: Option<&str>, plain: bool, brief: bool) -> Resul
     if let Some(q) = query {
         if brief {
             section(&mut out, &format!("Search: {q}"), plain);
-            out.push_str(&crate::search::run_brief(dir, q, None)?);
+            let f = crate::search::Filter::none();
+            out.push_str(&crate::search::run_brief(dir, q, None, &f)?);
         } else {
             section(&mut out, &format!("Search: {q}"), plain);
-            out.push_str(&crate::search::run(dir, q, plain, None)?);
+            let f = crate::search::Filter::none();
+            out.push_str(&crate::search::run(dir, q, plain, None, &f)?);
         }
     }
 

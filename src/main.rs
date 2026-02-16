@@ -53,9 +53,20 @@ fn main() {
     let cmd = &args[cmd_start..];
 
     let result: Result<String, String> = match cmd.first().map(|s| s.as_str()) {
-        Some("store") if cmd.len() >= 3 => store::run(&dir, &cmd[1], &cmd[2..].join(" ")),
+        Some("store") if cmd.len() >= 3 => {
+            let tags = parse_flag_str(cmd, "--tags");
+            let text_parts: Vec<&str> = cmd[2..].iter()
+                .filter(|a| *a != "--tags")
+                .filter(|a| {
+                    let prev = cmd.iter().position(|x| x == *a);
+                    prev.map_or(true, |i| i == 0 || cmd[i - 1] != "--tags")
+                })
+                .map(|s| s.as_str()).collect();
+            let text = text_parts.join(" ");
+            store::run_with_tags(&dir, &cmd[1], &text, tags.as_deref())
+        }
         Some("store") if cmd.len() == 2 => store::run(&dir, &cmd[1], "-"),
-        Some("store") => Err("usage: store <topic> <text|-> (- reads stdin)".into()),
+        Some("store") => Err("usage: store <topic> <text|-> [--tags t1,t2]".into()),
         Some("append") if cmd.len() >= 3 => store::append(&dir, &cmd[1], &cmd[2..].join(" ")),
         Some("append") if cmd.len() == 2 => store::append(&dir, &cmd[1], "-"),
         Some("append") => Err("usage: append <topic> <text|-> (adds to last entry)".into()),
@@ -64,27 +75,33 @@ fn main() {
             let count_only = cmd.iter().any(|a| a == "--count" || a == "-c");
             let topics_only = cmd.iter().any(|a| a == "--topics" || a == "-t");
             let limit: Option<usize> = parse_flag_value(cmd, "--limit");
+            let after = parse_flag_str(cmd, "--after").and_then(|s| time::parse_date_days(&s));
+            let before = parse_flag_str(cmd, "--before").and_then(|s| time::parse_date_days(&s));
+            let tag = parse_flag_str(cmd, "--tag");
+            let filter = search::Filter { after, before, tag };
+            let skip = ["--brief", "-b", "--count", "-c", "--topics", "-t",
+                        "--limit", "--after", "--before", "--tag"];
             let query_parts: Vec<&str> = cmd[1..].iter()
-                .filter(|a| *a != "--brief" && *a != "-b" && *a != "--count"
-                    && *a != "-c" && *a != "--topics" && *a != "-t" && *a != "--limit")
+                .filter(|a| !skip.contains(&a.as_str()))
                 .filter(|a| {
-                    // skip the value after --limit
                     let prev = cmd.iter().position(|x| x == *a);
-                    prev.map_or(true, |i| i == 0 || cmd[i - 1] != "--limit")
+                    prev.map_or(true, |i| {
+                        i == 0 || !["--limit", "--after", "--before", "--tag"].contains(&cmd[i - 1].as_str())
+                    })
                 })
                 .map(|s| s.as_str()).collect();
             let q = query_parts.join(" ");
             if count_only {
-                search::count(&dir, &q)
+                search::count(&dir, &q, &filter)
             } else if topics_only {
-                search::run_topics(&dir, &q)
+                search::run_topics(&dir, &q, &filter)
             } else if brief {
-                search::run_brief(&dir, &q, limit)
+                search::run_brief(&dir, &q, limit, &filter)
             } else {
-                search::run(&dir, &q, plain, limit)
+                search::run(&dir, &q, plain, limit, &filter)
             }
         }
-        Some("search") => Err("usage: search <query> [--brief|--count|--topics] [--limit N]".into()),
+        Some("search") => Err("usage: search <query> [--brief|--count|--topics] [--limit N] [--after DATE] [--before DATE] [--tag TAG]".into()),
         Some("context") => {
             let brief = cmd.iter().any(|a| a == "--brief" || a == "-b");
             let query_parts: Vec<&str> = cmd[1..].iter()
@@ -171,9 +188,16 @@ fn print_help() {
         "amaranthine — persistent knowledge base for AI dev\n\n",
         "USAGE: amaranthine [OPTIONS] <COMMAND>\n\n",
         "COMMANDS:\n",
-        "  store <topic> <text|->       Store entry (- reads stdin)\n",
+        "  store <topic> <text|-> [--tags t1,t2]  Store entry with optional tags\n",
         "  append <topic> <text|->      Add to last entry (no new timestamp)\n",
-        "  search <query> [--brief|--count|--topics] [--limit N]  Search\n",
+        "  search <query> [FLAGS]       Search entries\n",
+        "    --brief, -b                Quick results (topic + first line)\n",
+        "    --count, -c                Just count matches\n",
+        "    --topics, -t               Which topics matched + hit count\n",
+        "    --limit N                  Cap results\n",
+        "    --after YYYY-MM-DD         Entries on or after date\n",
+        "    --before YYYY-MM-DD        Entries on or before date\n",
+        "    --tag TAG                  Filter to entries with tag\n",
         "  context [query] [--brief]    Session briefing (--brief: topics only)\n",
         "  delete <topic> --last|--all|--match <str>  Remove entries\n",
         "  edit <topic> --match <str> <text>           Update matching entry\n",

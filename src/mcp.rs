@@ -95,7 +95,7 @@ fn init_result() -> Value {
         ])),
         ("serverInfo".into(), Value::Obj(vec![
             ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("0.7.0".into())),
+            ("version".into(), Value::Str("0.8.0".into())),
         ])),
     ])
 }
@@ -152,7 +152,8 @@ fn tool_list() -> Value {
         tool("store", "Store a timestamped knowledge entry under a topic. Warns on duplicate content.",
             &["topic", "text"],
             &[("topic", "string", "Topic name"),
-              ("text", "string", "Entry content")]),
+              ("text", "string", "Entry content"),
+              ("tags", "string", "Comma-separated tags (e.g. 'bug,p0,iris')")]),
         tool("append", "Add text to the last entry in a topic (no new timestamp). Use when adding related info to a recent entry.",
             &["topic", "text"],
             &[("topic", "string", "Topic name"),
@@ -160,17 +161,29 @@ fn tool_list() -> Value {
         tool("search", "Search all knowledge files (case-insensitive, returns full sections)",
             &["query"],
             &[("query", "string", "Search query"),
-              ("limit", "string", "Max results to return (default: unlimited)")]),
+              ("limit", "string", "Max results to return (default: unlimited)"),
+              ("after", "string", "Only entries on/after this date (YYYY-MM-DD)"),
+              ("before", "string", "Only entries on/before this date (YYYY-MM-DD)"),
+              ("tag", "string", "Only entries with this tag")]),
         tool("search_brief", "Quick search: just topic names + first matching line per hit",
             &["query"],
             &[("query", "string", "Search query"),
-              ("limit", "string", "Max results to return (default: unlimited)")]),
+              ("limit", "string", "Max results to return (default: unlimited)"),
+              ("after", "string", "Only entries on/after this date (YYYY-MM-DD)"),
+              ("before", "string", "Only entries on/before this date (YYYY-MM-DD)"),
+              ("tag", "string", "Only entries with this tag")]),
         tool("search_count", "Count matching sections without returning content. Fast way to gauge query scope.",
             &["query"],
-            &[("query", "string", "Search query")]),
+            &[("query", "string", "Search query"),
+              ("after", "string", "Only entries on/after this date (YYYY-MM-DD)"),
+              ("before", "string", "Only entries on/before this date (YYYY-MM-DD)"),
+              ("tag", "string", "Only entries with this tag")]),
         tool("search_topics", "Show which topics matched and how many hits per topic. Best first step before deep search.",
             &["query"],
-            &[("query", "string", "Search query")]),
+            &[("query", "string", "Search query"),
+              ("after", "string", "Only entries on/after this date (YYYY-MM-DD)"),
+              ("before", "string", "Only entries on/before this date (YYYY-MM-DD)"),
+              ("tag", "string", "Only entries with this tag")]),
         tool("context", "Session briefing: topics + recent entries (7 days) + optional search",
             &[],
             &[("query", "string", "Optional search query"),
@@ -207,12 +220,25 @@ fn tool_list() -> Value {
     ])
 }
 
+fn build_filter(args: Option<&Value>) -> crate::search::Filter {
+    let after = arg_str(args, "after");
+    let before = arg_str(args, "before");
+    let tag = arg_str(args, "tag");
+    crate::search::Filter {
+        after: if after.is_empty() { None } else { crate::time::parse_date_days(&after) },
+        before: if before.is_empty() { None } else { crate::time::parse_date_days(&before) },
+        tag: if tag.is_empty() { None } else { Some(tag) },
+    }
+}
+
 fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, String> {
     match name {
         "store" => {
             let topic = arg_str(args, "topic");
             let text = arg_str(args, "text");
-            crate::store::run(dir, &topic, &text)
+            let tags = arg_str(args, "tags");
+            let tags = if tags.is_empty() { None } else { Some(tags.as_str()) };
+            crate::store::run_with_tags(dir, &topic, &text, tags)
         }
         "append" => {
             let topic = arg_str(args, "topic");
@@ -222,20 +248,24 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
         "search" => {
             let query = arg_str(args, "query");
             let limit = arg_str(args, "limit").parse::<usize>().ok();
-            crate::search::run(dir, &query, true, limit)
+            let filter = build_filter(args);
+            crate::search::run(dir, &query, true, limit, &filter)
         }
         "search_brief" => {
             let query = arg_str(args, "query");
             let limit = arg_str(args, "limit").parse::<usize>().ok();
-            crate::search::run_brief(dir, &query, limit)
+            let filter = build_filter(args);
+            crate::search::run_brief(dir, &query, limit, &filter)
         }
         "search_count" => {
             let query = arg_str(args, "query");
-            crate::search::count(dir, &query)
+            let filter = build_filter(args);
+            crate::search::count(dir, &query, &filter)
         }
         "search_topics" => {
             let query = arg_str(args, "query");
-            crate::search::run_topics(dir, &query)
+            let filter = build_filter(args);
+            crate::search::run_topics(dir, &query, &filter)
         }
         "context" => {
             let q = arg_str(args, "query");

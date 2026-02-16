@@ -4,6 +4,10 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 
 pub fn run(dir: &Path, topic: &str, text: &str) -> Result<String, String> {
+    run_with_tags(dir, topic, text, None)
+}
+
+pub fn run_with_tags(dir: &Path, topic: &str, text: &str, tags: Option<&str>) -> Result<String, String> {
     crate::config::ensure_dir(dir)?;
     let text = read_text(text)?;
     let filename = crate::config::sanitize_topic(topic);
@@ -25,6 +29,12 @@ pub fn run(dir: &Path, topic: &str, text: &str) -> Result<String, String> {
         writeln!(file, "# {topic}\n").map_err(|e| e.to_string())?;
     }
     writeln!(file, "## {timestamp}").map_err(|e| e.to_string())?;
+    if let Some(tags) = tags {
+        let cleaned: Vec<&str> = tags.split(',').map(|t| t.trim()).filter(|t| !t.is_empty()).collect();
+        if !cleaned.is_empty() {
+            writeln!(file, "[tags: {}]", cleaned.join(", ")).map_err(|e| e.to_string())?;
+        }
+    }
     writeln!(file, "{text}\n").map_err(|e| e.to_string())?;
 
     let count = count_entries(&filepath);

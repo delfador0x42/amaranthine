@@ -2,15 +2,27 @@ use std::fmt::Write;
 use std::fs;
 use std::path::Path;
 
-pub fn run(dir: &Path, query: &str, plain: bool, limit: Option<usize>) -> Result<String, String> {
-    search(dir, query, plain, false, limit)
+/// Filter options for search (date range + tag)
+pub struct Filter {
+    pub after: Option<i64>,  // days since epoch
+    pub before: Option<i64>,
+    pub tag: Option<String>,
 }
 
-pub fn run_brief(dir: &Path, query: &str, limit: Option<usize>) -> Result<String, String> {
-    search(dir, query, true, true, limit)
+impl Filter {
+    pub fn none() -> Self { Self { after: None, before: None, tag: None } }
+    pub fn is_active(&self) -> bool { self.after.is_some() || self.before.is_some() || self.tag.is_some() }
 }
 
-pub fn run_topics(dir: &Path, query: &str) -> Result<String, String> {
+pub fn run(dir: &Path, query: &str, plain: bool, limit: Option<usize>, filter: &Filter) -> Result<String, String> {
+    search(dir, query, plain, false, limit, filter)
+}
+
+pub fn run_brief(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter) -> Result<String, String> {
+    search(dir, query, true, true, limit, filter)
+}
+
+pub fn run_topics(dir: &Path, query: &str, filter: &Filter) -> Result<String, String> {
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
     }
@@ -25,7 +37,8 @@ pub fn run_topics(dir: &Path, query: &str) -> Result<String, String> {
         let sections = parse_sections(&content);
         let mut n = 0;
         for section in &sections {
-            if section.iter().any(|l| l.to_lowercase().contains(&query_lower)) {
+            if !passes_filter(section, filter) { continue; }
+            if query.is_empty() || section.iter().any(|l| l.to_lowercase().contains(&query_lower)) {
                 n += 1;
             }
         }
@@ -47,7 +60,7 @@ pub fn run_topics(dir: &Path, query: &str) -> Result<String, String> {
     Ok(out)
 }
 
-pub fn count(dir: &Path, query: &str) -> Result<String, String> {
+pub fn count(dir: &Path, query: &str, filter: &Filter) -> Result<String, String> {
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
     }
@@ -61,7 +74,8 @@ pub fn count(dir: &Path, query: &str) -> Result<String, String> {
         let sections = parse_sections(&content);
         let mut file_hits = 0;
         for section in &sections {
-            if section.iter().any(|l| l.to_lowercase().contains(&query_lower)) {
+            if !passes_filter(section, filter) { continue; }
+            if query.is_empty() || section.iter().any(|l| l.to_lowercase().contains(&query_lower)) {
                 file_hits += 1;
                 total += 1;
             }
@@ -71,7 +85,7 @@ pub fn count(dir: &Path, query: &str) -> Result<String, String> {
     Ok(format!("{total} matches across {topics} topics for '{query}'"))
 }
 
-fn search(dir: &Path, query: &str, plain: bool, brief: bool, limit: Option<usize>) -> Result<String, String> {
+fn search(dir: &Path, query: &str, plain: bool, brief: bool, limit: Option<usize>, filter: &Filter) -> Result<String, String> {
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
     }
@@ -89,9 +103,18 @@ fn search(dir: &Path, query: &str, plain: bool, brief: bool, limit: Option<usize
         let mut file_matches = 0;
 
         for section in &sections {
-            if section.iter().any(|l| l.to_lowercase().contains(&query_lower)) {
+            if !passes_filter(section, filter) { continue; }
+            let text_match = query.is_empty()
+                || section.iter().any(|l| l.to_lowercase().contains(&query_lower));
+            if text_match {
                 if brief {
-                    if let Some(hit) = section.iter().find(|l| l.to_lowercase().contains(&query_lower)) {
+                    if query.is_empty() {
+                        // No query — show first content line
+                        if let Some(hit) = section.iter().find(|l| !l.starts_with("## ") && !l.starts_with("[tags:") && !l.trim().is_empty()) {
+                            let short = truncate(hit.trim(), 80);
+                            let _ = writeln!(out, "  [{name}] {short}");
+                        }
+                    } else if let Some(hit) = section.iter().find(|l| l.to_lowercase().contains(&query_lower)) {
                         let trimmed = hit.trim_start_matches("- ").trim();
                         let short = truncate(trimmed, 80);
                         let _ = writeln!(out, "  [{name}] {short}");
@@ -105,7 +128,7 @@ fn search(dir: &Path, query: &str, plain: bool, brief: bool, limit: Option<usize
                         }
                     }
                     for line in section {
-                        if line.to_lowercase().contains(&query_lower) {
+                        if !query.is_empty() && line.to_lowercase().contains(&query_lower) {
                             if plain {
                                 let _ = writeln!(out, "> {line}");
                             } else {
@@ -127,7 +150,11 @@ fn search(dir: &Path, query: &str, plain: bool, brief: bool, limit: Option<usize
     }
 
     if total == 0 {
-        let _ = writeln!(out, "no matches for '{query}'");
+        if filter.is_active() {
+            let _ = writeln!(out, "no matches (filters active)");
+        } else {
+            let _ = writeln!(out, "no matches for '{query}'");
+        }
     } else if limited {
         let _ = writeln!(out, "(showing {total} of {total}+ matches, limit applied)");
     } else if brief {
@@ -138,6 +165,40 @@ fn search(dir: &Path, query: &str, plain: bool, brief: bool, limit: Option<usize
     Ok(out)
 }
 
+/// Check if a section passes date and tag filters.
+fn passes_filter(section: &[&str], filter: &Filter) -> bool {
+    // Date filter: extract from "## YYYY-MM-DD HH:MM" header
+    if filter.after.is_some() || filter.before.is_some() {
+        let date = section.first()
+            .and_then(|h| h.strip_prefix("## "))
+            .and_then(crate::time::parse_date_days);
+        match date {
+            Some(d) => {
+                if let Some(after) = filter.after {
+                    if d < after { return false; }
+                }
+                if let Some(before) = filter.before {
+                    if d > before { return false; }
+                }
+            }
+            None => return false, // no parseable date → skip when date filter active
+        }
+    }
+    // Tag filter: look for "[tags: ...]" line in section
+    if let Some(ref tag) = filter.tag {
+        let tag_lower = tag.to_lowercase();
+        let has_tag = section.iter().any(|line| {
+            if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
+                inner.split(',').any(|t| t.trim().to_lowercase() == tag_lower)
+            } else {
+                false
+            }
+        });
+        if !has_tag { return false; }
+    }
+    true
+}
+
 fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max { return s; }
     let mut end = max;
@@ -145,7 +206,7 @@ fn truncate(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-fn parse_sections(content: &str) -> Vec<Vec<&str>> {
+pub fn parse_sections(content: &str) -> Vec<Vec<&str>> {
     let mut sections: Vec<Vec<&str>> = Vec::new();
     let mut current: Vec<&str> = Vec::new();
 
