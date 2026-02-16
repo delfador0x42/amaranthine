@@ -203,14 +203,16 @@ fn tool_list() -> Value {
             &[("topic", "string", "Topic name"),
               ("text", "string", "Entry content"),
               ("tags", "string", "Comma-separated tags (e.g. 'bug,p0,iris')"),
-              ("force", "string", "Set to 'true' to bypass duplicate detection")]),
+              ("force", "string", "Set to 'true' to bypass duplicate detection"),
+              ("terse", "string", "Set to 'true' for minimal response (just first line)")]),
         tool("append", "Add text to the last entry in a topic (no new timestamp). Use when adding related info to a recent entry.",
             &["topic", "text"],
             &[("topic", "string", "Topic name"),
               ("text", "string", "Text to append")]),
         tool("batch_store", "Store multiple entries in one call. Each entry: {topic, text, tags?}. Faster than sequential store calls.",
             &["entries"],
-            &[("entries", "string", "JSON array of objects: [{\"topic\":\"...\",\"text\":\"...\",\"tags\":\"...\"}]")]),
+            &[("entries", "string", "JSON array of objects: [{\"topic\":\"...\",\"text\":\"...\",\"tags\":\"...\"}]"),
+              ("terse", "string", "Set to 'true' for minimal response (just count)")]),
         tool("search", "Search all knowledge files (case-insensitive). Splits CamelCase/snake_case. Falls back to OR when AND finds nothing.",
             &["query"], &search_props),
         tool("search_brief", "Quick search: just topic names + first matching line per hit",
@@ -282,6 +284,21 @@ fn tool_list() -> Value {
         tool("migrate", "Find and fix entries without proper timestamps.",
             &[],
             &[("apply", "string", "Set to 'true' to backfill timestamps (default: dry run)")]),
+        tool("get_entry", "Fetch a single entry by topic and index number. Use after list_entries to read specific entries.",
+            &["topic", "index"],
+            &[("topic", "string", "Topic name"),
+              ("index", "string", "Entry index number (0-based, from list_entries)")]),
+        tool("rename_topic", "Rename a topic (moves the file). All entries preserved.",
+            &["topic", "new_name"],
+            &[("topic", "string", "Current topic name"),
+              ("new_name", "string", "New topic name")]),
+        tool("tag_entry", "Add or remove tags on an existing entry. Use to mark entries as superseded or add missing tags.",
+            &["topic", "tags"],
+            &[("topic", "string", "Topic name"),
+              ("index", "string", "Entry index number (from list_entries)"),
+              ("match_str", "string", "Substring to find the entry"),
+              ("tags", "string", "Comma-separated tags to add"),
+              ("remove", "string", "Comma-separated tags to remove")]),
         tool("_reload", "Re-exec the server binary to pick up code changes. Sends tools/list_changed notification after reload.",
             &[], &[]),
     ])
@@ -347,9 +364,14 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
             let text = arg_str(args, "text");
             let tags = arg_str(args, "tags");
             let tags = if tags.is_empty() { None } else { Some(tags.as_str()) };
-            let force = arg_str(args, "force");
-            let force = force == "true" || force == "1";
-            crate::store::run_full(dir, &topic, &text, tags, force)
+            let force = arg_bool(args, "force");
+            let terse = arg_bool(args, "terse");
+            let result = crate::store::run_full(dir, &topic, &text, tags, force)?;
+            if terse {
+                Ok(result.lines().next().unwrap_or(&result).to_string())
+            } else {
+                Ok(result)
+            }
         }
         "append" => {
             let topic = arg_str(args, "topic");
@@ -358,11 +380,13 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
         }
         "batch_store" => {
             let raw = arg_str(args, "entries");
+            let terse = arg_bool(args, "terse");
             let arr = crate::json::parse(&raw).map_err(|e| format!("invalid JSON: {e}"))?;
             let items = match &arr {
                 Value::Arr(v) => v,
                 _ => return Err("entries must be a JSON array".into()),
             };
+            let mut ok_count = 0;
             let mut results = Vec::new();
             for (i, item) in items.iter().enumerate() {
                 let topic = item.get("topic").and_then(|v| v.as_str()).unwrap_or("");
@@ -374,7 +398,7 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
                 }
                 match crate::store::run_full(dir, topic, text, tags, false) {
                     Ok(msg) => {
-                        // Extract just the first line (stored confirmation)
+                        ok_count += 1;
                         let first = msg.lines().next().unwrap_or(&msg);
                         results.push(format!("  [{}] {}", i + 1, first));
                     }
@@ -384,7 +408,11 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
                     }
                 }
             }
-            Ok(format!("batch: {}/{} stored\n{}", results.len(), items.len(), results.join("\n")))
+            if terse {
+                Ok(format!("batch: {ok_count}/{} stored", items.len()))
+            } else {
+                Ok(format!("batch: {ok_count}/{} stored\n{}", items.len(), results.join("\n")))
+            }
         }
         "search" => {
             let query = arg_str(args, "query");
@@ -524,6 +552,32 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
             let apply = arg_str(args, "apply") == "true";
             crate::migrate::run(dir, apply)
         }
+        "get_entry" => {
+            let topic = arg_str(args, "topic");
+            let idx_str = arg_str(args, "index");
+            let idx: usize = idx_str.parse()
+                .map_err(|_| format!("invalid index: '{idx_str}'"))?;
+            crate::stats::get_entry(dir, &topic, idx)
+        }
+        "rename_topic" => {
+            let topic = arg_str(args, "topic");
+            let new_name = arg_str(args, "new_name");
+            crate::edit::rename_topic(dir, &topic, &new_name)
+        }
+        "tag_entry" => {
+            let topic = arg_str(args, "topic");
+            let idx_str = arg_str(args, "index");
+            let needle = arg_str(args, "match_str");
+            let add_tags = arg_str(args, "tags");
+            let rm_tags = arg_str(args, "remove");
+            let idx = if !idx_str.is_empty() {
+                Some(idx_str.parse::<usize>().map_err(|_| format!("invalid index: '{idx_str}'"))?)
+            } else { None };
+            let needle = if needle.is_empty() { None } else { Some(needle.as_str()) };
+            let add = if add_tags.is_empty() { None } else { Some(add_tags.as_str()) };
+            let rm = if rm_tags.is_empty() { None } else { Some(rm_tags.as_str()) };
+            crate::edit::tag_entry(dir, &topic, idx, needle, add, rm)
+        }
         _ => Err(format!("unknown tool: {name}")),
     }
 }
@@ -537,4 +591,9 @@ fn arg_str(args: Option<&Value>, key: &str) -> String {
             _ => String::new(),
         })
         .unwrap_or_default()
+}
+
+fn arg_bool(args: Option<&Value>, key: &str) -> bool {
+    let s = arg_str(args, key);
+    s == "true" || s == "1"
 }

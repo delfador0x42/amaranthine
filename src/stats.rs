@@ -84,6 +84,23 @@ pub fn stats(dir: &Path) -> Result<String, String> {
     Ok(out)
 }
 
+/// Fetch a single entry by index.
+pub fn get_entry(dir: &Path, topic: &str, idx: usize) -> Result<String, String> {
+    let filename = crate::config::sanitize_topic(topic);
+    let filepath = dir.join(format!("{filename}.md"));
+    if !filepath.exists() {
+        return Err(format!("{filename}.md not found"));
+    }
+    let content = fs::read_to_string(&filepath).map_err(|e| e.to_string())?;
+    let sections = crate::delete::split_sections(&content);
+    if idx >= sections.len() {
+        return Err(format!("index {idx} out of range (topic has {} entries, 0-{})",
+            sections.len(), sections.len().saturating_sub(1)));
+    }
+    let (hdr, body) = &sections[idx];
+    Ok(format!("{hdr}\n{body}"))
+}
+
 /// List entries in a topic, optionally filtered by match_str. For bulk review.
 pub fn list_entries(dir: &Path, topic: &str, match_str: Option<&str>) -> Result<String, String> {
     let filename = crate::config::sanitize_topic(topic);

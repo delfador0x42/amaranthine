@@ -98,10 +98,15 @@ pub fn run_medium(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter
         let _ = writeln!(out, "(no exact match — showing OR results)");
     }
 
-    // Medium format: [topic] timestamp header + first 2 content lines
+    // Medium format: [topic] timestamp header + tags + first 2 content lines
     for r in results.iter().take(show) {
         let header = r.section.first().map(|s| s.as_str()).unwrap_or("??");
-        let _ = writeln!(out, "  [{}] {}", r.name, header.trim_start_matches("## "));
+        let tags = extract_tags(&r.section);
+        if let Some(ref t) = tags {
+            let _ = writeln!(out, "  [{}] {} {}", r.name, header.trim_start_matches("## "), t);
+        } else {
+            let _ = writeln!(out, "  [{}] {}", r.name, header.trim_start_matches("## "));
+        }
         let mut content_lines = 0;
         for line in r.section.iter().skip(1) {
             if line.starts_with("[tags:") || line.trim().is_empty() { continue; }
@@ -342,15 +347,17 @@ fn search(dir: &Path, query: &str, plain: bool, brief: bool, limit: Option<usize
     for result in results.iter().take(show) {
         if brief {
             let section_refs: Vec<&str> = result.section.iter().map(|s| s.as_str()).collect();
+            let tags = extract_tags(&section_refs);
+            let tag_suffix = tags.map(|t| format!(" {t}")).unwrap_or_default();
             if terms.is_empty() {
                 if let Some(hit) = section_refs.iter().find(|l| !l.starts_with("## ") && !l.starts_with("[tags:") && !l.trim().is_empty()) {
                     let short = truncate(hit.trim(), 80);
-                    let _ = writeln!(out, "  [{}] {short}", result.name);
+                    let _ = writeln!(out, "  [{}] {short}{tag_suffix}", result.name);
                 }
             } else if let Some(hit) = section_refs.iter().find(|l| terms.iter().any(|t| l.to_lowercase().contains(t.as_str()))) {
                 let trimmed = hit.trim_start_matches("- ").trim();
                 let short = truncate(trimmed, 80);
-                let _ = writeln!(out, "  [{}] {short}", result.name);
+                let _ = writeln!(out, "  [{}] {short}{tag_suffix}", result.name);
             }
         } else {
             if result.name != last_file {
@@ -531,6 +538,19 @@ fn matches_terms(section: &[&str], terms: &[String], mode: SearchMode) -> bool {
         SearchMode::And => terms.iter().all(|term| combined.contains(term.as_str())),
         SearchMode::Or => terms.iter().any(|term| combined.contains(term.as_str())),
     }
+}
+
+/// Extract tags from a section as a compact "#tag1 #tag2" string.
+fn extract_tags(section: &[impl AsRef<str>]) -> Option<String> {
+    for line in section {
+        if let Some(inner) = line.as_ref().strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
+            let tags: Vec<&str> = inner.split(',').map(|t| t.trim()).filter(|t| !t.is_empty()).collect();
+            if !tags.is_empty() {
+                return Some(tags.iter().map(|t| format!("#{t}")).collect::<Vec<_>>().join(" "));
+            }
+        }
+    }
+    None
 }
 
 fn truncate(s: &str, max: usize) -> &str {

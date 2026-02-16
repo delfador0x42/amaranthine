@@ -16,7 +16,8 @@ rm -f /tmp/amaranthine-hook-file.last
 rm -f /tmp/amaranthine-hook-read.last
 rm -f /tmp/amaranthine-hook-stop.last
 
-CONTEXT=$("$AMR" --plain context --brief 2>/dev/null)
+# Show recent entries (last 3 days) instead of topic list (already in MEMORY.md)
+CONTEXT=$("$AMR" --plain recent 3 2>/dev/null)
 if [ -n "$CONTEXT" ]; then
   ESCAPED=$(echo "$CONTEXT" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
   echo "{\"hookSpecificOutput\":{\"additionalContext\":$ESCAPED}}"
