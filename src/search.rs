@@ -427,12 +427,22 @@ fn truncate(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+/// Check if a line is an entry header: "## YYYY-MM-DD" pattern.
+/// Prevents "## " in entry body text from breaking section boundaries.
+pub fn is_entry_header(line: &str) -> bool {
+    let b = line.as_bytes();
+    // "## YYYY-" = 8 chars minimum
+    b.len() >= 8 && b[0] == b'#' && b[1] == b'#' && b[2] == b' '
+        && b[3].is_ascii_digit() && b[4].is_ascii_digit()
+        && b[5].is_ascii_digit() && b[6].is_ascii_digit() && b[7] == b'-'
+}
+
 pub fn parse_sections(content: &str) -> Vec<Vec<&str>> {
     let mut sections: Vec<Vec<&str>> = Vec::new();
     let mut current: Vec<&str> = Vec::new();
 
     for line in content.lines() {
-        if line.starts_with("## ") && !current.is_empty() {
+        if is_entry_header(line) && !current.is_empty() {
             sections.push(current);
             current = Vec::new();
         }

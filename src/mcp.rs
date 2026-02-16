@@ -95,7 +95,7 @@ fn init_result() -> Value {
         ])),
         ("serverInfo".into(), Value::Obj(vec![
             ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("1.1.0".into())),
+            ("version".into(), Value::Str("1.3.0".into())),
         ])),
     ])
 }
@@ -191,9 +191,10 @@ fn tool_list() -> Value {
               ("brief", "string", "Set to 'true' for compact mode (topics only, no recent)")]),
         tool("topics", "List all topic files with entry and line counts",
             &[], &[]),
-        tool("recent", "Show entries from last N days across all topics",
+        tool("recent", "Show entries from last N days (or hours) across all topics",
             &[],
-            &[("days", "string", "Number of days (default: 7)")]),
+            &[("days", "string", "Number of days (default: 7)"),
+              ("hours", "string", "Number of hours (overrides days for finer granularity)")]),
         tool("delete_entry", "Remove the most recent entry from a topic",
             &["topic"],
             &[("topic", "string", "Topic name"),
@@ -351,9 +352,14 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
         }
         "topics" => crate::topics::list(dir),
         "recent" => {
-            let d = arg_str(args, "days");
-            let days = d.parse().unwrap_or(7u64);
-            crate::topics::recent(dir, days, true)
+            let h = arg_str(args, "hours");
+            if let Ok(hours) = h.parse::<u64>() {
+                crate::topics::recent_hours(dir, hours, true)
+            } else {
+                let d = arg_str(args, "days");
+                let days = d.parse().unwrap_or(7u64);
+                crate::topics::recent(dir, days, true)
+            }
         }
         "delete_entry" => {
             let topic = arg_str(args, "topic");

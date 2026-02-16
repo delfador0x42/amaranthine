@@ -110,19 +110,44 @@ pub fn rebuild_file(
     result
 }
 
-/// Split content into (header_line, body) pairs for each `## ` section.
-/// Skips the `# title` header at the top.
+/// Check if position in bytes starts an entry header "## YYYY-".
+fn is_header_at(bytes: &[u8], pos: usize) -> bool {
+    pos + 7 < bytes.len()
+        && bytes[pos] == b'#' && bytes[pos + 1] == b'#' && bytes[pos + 2] == b' '
+        && bytes[pos + 3].is_ascii_digit() && bytes[pos + 4].is_ascii_digit()
+        && bytes[pos + 5].is_ascii_digit() && bytes[pos + 6].is_ascii_digit()
+        && bytes[pos + 7] == b'-'
+}
+
+/// Find next entry header ("\n## YYYY-") starting from `from`. Returns position of "##".
+fn find_next_header(content: &str, from: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let mut pos = from;
+    while pos < bytes.len() {
+        match content[pos..].find("\n## ") {
+            Some(p) => {
+                let abs = pos + p + 1;
+                if is_header_at(bytes, abs) { return Some(abs); }
+                pos = abs + 3;
+            }
+            None => break,
+        }
+    }
+    None
+}
+
+/// Split content into (header_line, body) pairs for each `## YYYY-MM-DD` section.
+/// Only splits on proper entry headers, not "## " in body text.
 pub fn split_sections(content: &str) -> Vec<(&str, &str)> {
     let mut sections = Vec::new();
     let mut i = 0;
     let bytes = content.as_bytes();
 
     while i < bytes.len() {
-        // Find next ## header
-        let hdr_start = if content[i..].starts_with("## ") {
+        let hdr_start = if is_header_at(bytes, i) {
             Some(i)
         } else {
-            content[i..].find("\n## ").map(|p| i + p + 1)
+            find_next_header(content, i)
         };
 
         let hdr_start = match hdr_start {
@@ -135,10 +160,7 @@ pub fn split_sections(content: &str) -> Vec<(&str, &str)> {
             .unwrap_or(content.len());
 
         let header = &content[hdr_start..hdr_end];
-
-        // Body extends to next ## or end
-        let body_end = content[hdr_end..].find("\n## ")
-            .map(|p| hdr_end + p + 1)
+        let body_end = find_next_header(content, hdr_end)
             .unwrap_or(content.len());
 
         let body = &content[hdr_end..body_end];

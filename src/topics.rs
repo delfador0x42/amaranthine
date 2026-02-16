@@ -74,12 +74,24 @@ fn last_entry_preview(content: &str) -> String {
 }
 
 pub fn recent(dir: &Path, days: u64, plain: bool) -> Result<String, String> {
+    recent_inner(dir, Some(days), None, plain)
+}
+
+pub fn recent_hours(dir: &Path, hours: u64, plain: bool) -> Result<String, String> {
+    recent_inner(dir, None, Some(hours), plain)
+}
+
+fn recent_inner(dir: &Path, days: Option<u64>, hours: Option<u64>, plain: bool) -> Result<String, String> {
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
     }
 
-    let today = time::LocalTime::now().to_days();
-    let cutoff = today - days as i64;
+    let now = time::LocalTime::now();
+    // Use minutes-based comparison for hours, days-based for days
+    let use_minutes = hours.is_some();
+    let cutoff_min = now.to_minutes() - hours.unwrap_or(0) as i64 * 60;
+    let cutoff_day = now.to_days() - days.unwrap_or(7) as i64;
+
     let files = crate::config::list_topic_files(dir)?;
     let mut found = 0;
     let mut out = String::new();
@@ -92,9 +104,15 @@ pub fn recent(dir: &Path, days: u64, plain: bool) -> Result<String, String> {
         for line in content.lines() {
             if line.starts_with("## ") {
                 let header = line.trim_start_matches("## ");
-                in_recent = time::parse_date_days(header)
-                    .map(|d| d >= cutoff)
-                    .unwrap_or(false);
+                in_recent = if use_minutes {
+                    time::parse_date_minutes(header)
+                        .map(|m| m >= cutoff_min)
+                        .unwrap_or(false)
+                } else {
+                    time::parse_date_days(header)
+                        .map(|d| d >= cutoff_day)
+                        .unwrap_or(false)
+                };
                 if in_recent {
                     if plain {
                         let _ = writeln!(out, "[{name}] {line}");
@@ -110,7 +128,12 @@ pub fn recent(dir: &Path, days: u64, plain: bool) -> Result<String, String> {
     }
 
     if found == 0 {
-        let _ = writeln!(out, "no entries in the last {days} days");
+        let label = if use_minutes {
+            format!("{} hours", hours.unwrap_or(0))
+        } else {
+            format!("{} days", days.unwrap_or(7))
+        };
+        let _ = writeln!(out, "no entries in the last {label}");
     }
     Ok(out)
 }

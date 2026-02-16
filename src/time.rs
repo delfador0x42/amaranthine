@@ -48,6 +48,10 @@ impl LocalTime {
     pub fn to_days(&self) -> i64 {
         civil_to_days(self.year, self.month, self.day)
     }
+
+    pub fn to_minutes(&self) -> i64 {
+        self.to_days() * 1440 + self.hour as i64 * 60 + self.min as i64
+    }
 }
 
 impl fmt::Display for LocalTime {
@@ -71,6 +75,25 @@ pub fn parse_date_days(s: &str) -> Option<i64> {
         return None;
     }
     Some(civil_to_days(y, m, d))
+}
+
+/// Parse "YYYY-MM-DD HH:MM" to minutes since epoch. Falls back to midnight if no time.
+pub fn parse_date_minutes(s: &str) -> Option<i64> {
+    let mut ws = s.split_whitespace();
+    let date = ws.next()?;
+    let mut dp = date.splitn(3, '-');
+    let y: i32 = dp.next()?.parse().ok()?;
+    let m: u32 = dp.next()?.parse().ok()?;
+    let d: u32 = dp.next()?.parse().ok()?;
+    if m < 1 || m > 12 || d < 1 || d > 31 { return None; }
+    let days = civil_to_days(y, m, d);
+    let (h, min) = if let Some(time) = ws.next() {
+        let mut tp = time.splitn(2, ':');
+        let h: i64 = tp.next()?.parse().ok()?;
+        let m: i64 = tp.next()?.parse().ok()?;
+        (h, m)
+    } else { (0, 0) };
+    Some(days * 1440 + h * 60 + min)
 }
 
 /// Howard Hinnant's days_from_civil algorithm.
