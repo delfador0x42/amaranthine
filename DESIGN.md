@@ -32,14 +32,14 @@ one command to store, one to search, one to orient at session start.
 - Timestamps in `## YYYY-MM-DD HH:MM` format: parseable, sortable
 - MCP server calls own CLI as subprocesses: zero code duplication
 - Hand-rolled JSON parser: recursive descent, ~200 lines, handles full spec
-- `install` modifies settings.json directly via own JSON parser (dogfooding)
+- `install` modifies ~/.claude.json directly via own JSON parser (dogfooding)
 - Single knowledge dir: ~/.amaranthine/ always, --dir for explicit override only
 
 ## Key Files
 - `src/main.rs` — CLI entry, manual arg parsing
 - `src/json.rs` — recursive descent JSON parser + pretty printer
 - `src/mcp.rs` — MCP server: stdio loop, 8 tools, subprocess dispatch
-- `src/install.rs` — self-install to settings.json + CLAUDE.md
+- `src/install.rs` — self-install to ~/.claude.json + CLAUDE.md
 - `src/time.rs` — libc FFI (localtime_r), Hinnant date algorithm
 - `src/config.rs` — path resolution, sanitization, file listing
 - `src/context.rs` — session orientation (topics + recent + search)

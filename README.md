@@ -13,7 +13,7 @@ cd amaranthine && cargo build --release && sudo cp target/release/amaranthine /u
 
 That's it. `amaranthine install` does three things:
 1. Creates `~/.amaranthine/` (where all knowledge lives)
-2. Adds MCP server to `~/.claude/settings.json`
+2. Adds MCP server to `~/.claude.json`
 3. Adds usage instructions to `~/.claude/CLAUDE.md`
 
 Restart Claude Code. Your agent now has 9 tools for persistent memory.
