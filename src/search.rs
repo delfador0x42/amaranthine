@@ -32,30 +32,36 @@ pub fn run_topics(dir: &Path, query: &str, filter: &Filter) -> Result<String, St
     }
     let terms = query_terms(query);
     let files = crate::config::list_search_files(dir)?;
-    let mut hits: Vec<(String, usize)> = Vec::new();
-    let mut total = 0;
 
-    for path in &files {
-        let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let name = path.file_stem().unwrap().to_string_lossy().to_string();
-        let sections = parse_sections(&content);
-        let mut n = 0;
-        for section in &sections {
-            if !passes_filter(section, filter) { continue; }
-            if matches_terms(section, &terms, filter.mode) {
-                n += 1;
-            }
+    let count_hits = |mode: SearchMode| -> Vec<(String, usize)> {
+        let mut hits = Vec::new();
+        for path in &files {
+            let content = match fs::read_to_string(path) { Ok(c) => c, Err(_) => continue };
+            let name = path.file_stem().unwrap().to_string_lossy().to_string();
+            let sections = parse_sections(&content);
+            let n = sections.iter()
+                .filter(|s| passes_filter(s, filter) && matches_terms(s, &terms, mode))
+                .count();
+            if n > 0 { hits.push((name, n)); }
         }
-        if n > 0 {
-            total += n;
-            hits.push((name, n));
-        }
+        hits
+    };
+
+    let mut hits = count_hits(filter.mode);
+    let mut fallback = false;
+    if hits.is_empty() && filter.mode == SearchMode::And && terms.len() >= 2 {
+        hits = count_hits(SearchMode::Or);
+        fallback = !hits.is_empty();
     }
 
+    let total: usize = hits.iter().map(|(_, n)| n).sum();
     let mut out = String::new();
     if hits.is_empty() {
         out.push_str(&no_match_message(query, filter, dir));
     } else {
+        if fallback {
+            let _ = writeln!(out, "(no exact match — showing OR results)");
+        }
         for (topic, n) in &hits {
             let _ = writeln!(out, "  {topic}: {n} hit{}", if *n == 1 { "" } else { "s" });
         }
@@ -70,23 +76,34 @@ pub fn count(dir: &Path, query: &str, filter: &Filter) -> Result<String, String>
     }
     let terms = query_terms(query);
     let files = crate::config::list_search_files(dir)?;
-    let mut total = 0;
-    let mut topics = 0;
 
-    for path in &files {
-        let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let sections = parse_sections(&content);
-        let mut file_hits = 0;
-        for section in &sections {
-            if !passes_filter(section, filter) { continue; }
-            if matches_terms(section, &terms, filter.mode) {
-                file_hits += 1;
-                total += 1;
-            }
+    let do_count = |mode: SearchMode| -> (usize, usize) {
+        let mut total = 0;
+        let mut topics = 0;
+        for path in &files {
+            let content = match fs::read_to_string(path) { Ok(c) => c, Err(_) => continue };
+            let sections = parse_sections(&content);
+            let file_hits = sections.iter()
+                .filter(|s| passes_filter(s, filter) && matches_terms(s, &terms, mode))
+                .count();
+            total += file_hits;
+            if file_hits > 0 { topics += 1; }
         }
-        if file_hits > 0 { topics += 1; }
+        (total, topics)
+    };
+
+    let (total, topics) = do_count(filter.mode);
+    if total > 0 {
+        return Ok(format!("{total} matches across {topics} topics for '{query}'"));
     }
-    Ok(format!("{total} matches across {topics} topics for '{query}'"))
+    // AND→OR fallback
+    if filter.mode == SearchMode::And && terms.len() >= 2 {
+        let (total, topics) = do_count(SearchMode::Or);
+        if total > 0 {
+            return Ok(format!("(no exact match — OR fallback) {total} matches across {topics} topics for '{query}'"));
+        }
+    }
+    Ok(format!("0 matches for '{query}'"))
 }
 
 /// BM25 parameters (Okapi BM25 standard values)

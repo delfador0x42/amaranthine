@@ -76,7 +76,7 @@ pub fn run(dir: &Path, topic: &str, apply: bool) -> Result<String, String> {
         if !result.ends_with('\n') { result.push('\n'); }
     }
 
-    fs::write(&filepath, &result).map_err(|e| e.to_string())?;
+    crate::config::atomic_write(&filepath, &result)?;
     let new_count = result.matches("\n## ").count();
     let _ = writeln!(out, "compacted: merged {} pairs, {new_count} entries remaining", skip.len());
     Ok(out)

@@ -61,15 +61,17 @@ fn main() {
     let result: Result<String, String> = match cmd.first().map(|s| s.as_str()) {
         Some("store") if cmd.len() >= 3 => {
             let tags = parse_flag_str(cmd, "--tags");
+            let force = cmd.iter().any(|a| a == "--force" || a == "-f");
+            let skip = ["--tags", "--force", "-f"];
             let text_parts: Vec<&str> = cmd[2..].iter()
-                .filter(|a| *a != "--tags")
+                .filter(|a| !skip.contains(&a.as_str()))
                 .filter(|a| {
                     let prev = cmd.iter().position(|x| x == *a);
                     prev.map_or(true, |i| i == 0 || cmd[i - 1] != "--tags")
                 })
                 .map(|s| s.as_str()).collect();
             let text = text_parts.join(" ");
-            store::run_with_tags(&dir, &cmd[1], &text, tags.as_deref())
+            store::run_full(&dir, &cmd[1], &text, tags.as_deref(), force)
         }
         Some("store") if cmd.len() == 2 => store::run(&dir, &cmd[1], "-"),
         Some("store") => Err("usage: store <topic> <text|-> [--tags t1,t2]".into()),

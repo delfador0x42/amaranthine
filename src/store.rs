@@ -1,22 +1,28 @@
 use crate::time::LocalTime;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::fs;
+use std::io::{self, Read};
 use std::path::Path;
 
 pub fn run(dir: &Path, topic: &str, text: &str) -> Result<String, String> {
-    run_with_tags(dir, topic, text, None)
+    run_full(dir, topic, text, None, false)
 }
 
 pub fn run_with_tags(dir: &Path, topic: &str, text: &str, tags: Option<&str>) -> Result<String, String> {
+    run_full(dir, topic, text, tags, false)
+}
+
+pub fn run_full(dir: &Path, topic: &str, text: &str, tags: Option<&str>, force: bool) -> Result<String, String> {
     crate::config::ensure_dir(dir)?;
     let _lock = crate::lock::FileLock::acquire(dir)?;
     let text = read_text(text)?;
     let filename = crate::config::sanitize_topic(topic);
     let filepath = dir.join(format!("{filename}.md"));
 
-    // Check for duplicates — block store if high overlap
-    if let Some(existing) = check_dupe(&filepath, &text) {
-        return Err(format!("blocked: similar entry already exists in {filename}.md\n  existing: {existing}\nUse update_entry or append_entry to modify it."));
+    // Check for duplicates — warn/block if high overlap (skip with force)
+    if !force {
+        if let Some(existing) = check_dupe(&filepath, &text) {
+            return Err(format!("blocked: similar entry already exists in {filename}.md\n  existing: {existing}\nUse update_entry or append_entry to modify it, or pass force=true to override."));
+        }
     }
     // Suggest existing topics if this is a new topic
     let topic_hint = if !filepath.exists() { suggest_topic(dir, &filename) } else { None };
@@ -28,38 +34,35 @@ pub fn run_with_tags(dir: &Path, topic: &str, text: &str, tags: Option<&str>) ->
     let cleaned_tags = tags.map(|t| normalize_tags(t));
     let tag_warn = tags.and_then(|t| check_similar_tags(dir, t));
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&filepath)
-        .map_err(|e| format!("can't open {}: {e}", filepath.display()))?;
+    // Build new content: read existing + append new entry
+    let mut content = if is_new {
+        format!("# {topic}\n\n")
+    } else {
+        fs::read_to_string(&filepath)
+            .map_err(|e| format!("can't read {}: {e}", filepath.display()))?
+    };
 
-    if is_new {
-        writeln!(file, "# {topic}\n").map_err(|e| e.to_string())?;
-    }
-    writeln!(file, "## {timestamp}").map_err(|e| e.to_string())?;
+    content.push_str(&format!("## {timestamp}\n"));
     if let Some(ref tags) = cleaned_tags {
         if !tags.is_empty() {
-            writeln!(file, "[tags: {tags}]").map_err(|e| e.to_string())?;
+            content.push_str(&format!("[tags: {tags}]\n"));
         }
     }
-    writeln!(file, "{text}\n").map_err(|e| e.to_string())?;
+    content.push_str(&format!("{text}\n\n"));
+
+    crate::config::atomic_write(&filepath, &content)?;
 
     let count = count_entries(&filepath);
 
-    // Echo back what was stored
-    let preview = if text.len() > 120 {
-        let mut end = 120;
-        while end > 0 && !text.is_char_boundary(end) { end -= 1; }
-        format!("{}...", &text[..end])
-    } else {
-        text.clone()
-    };
+    // Echo back what was stored (full text, indented)
+    let echo_text = text.lines()
+        .map(|l| format!("  > {l}"))
+        .collect::<Vec<_>>().join("\n");
     let tag_echo = cleaned_tags.as_deref().filter(|t| !t.is_empty())
         .map(|t| format!(" [tags: {t}]"))
         .unwrap_or_default();
 
-    let mut msg = format!("stored in {filename}.md ({count} entries)\n  @ {timestamp}{tag_echo}\n  > {preview}");
+    let mut msg = format!("stored in {filename}.md ({count} entries)\n  @ {timestamp}{tag_echo}\n{echo_text}");
     if let Some(hint) = topic_hint {
         msg.push_str(&format!("\n  note: {hint}"));
     }
@@ -96,7 +99,7 @@ pub fn append(dir: &Path, topic: &str, text: &str) -> Result<String, String> {
     // Append by adding text before the trailing newline
     let trimmed = content.trim_end();
     let result = format!("{trimmed}\n{text}\n\n");
-    fs::write(&filepath, &result).map_err(|e| e.to_string())?;
+    crate::config::atomic_write(&filepath, &result)?;
     Ok(format!("appended to last entry in {filename}.md"))
 }
 
@@ -114,15 +117,34 @@ fn read_text(text: &str) -> Result<String, String> {
     }
 }
 
-/// Normalize tags: lowercase, trim, dedupe, sort.
+/// Normalize tags: lowercase, trim, singularize, dedupe, sort.
 fn normalize_tags(raw: &str) -> String {
     let mut tags: Vec<String> = raw.split(',')
-        .map(|t| t.trim().to_lowercase())
+        .map(|t| singularize(t.trim()).to_lowercase())
         .filter(|t| !t.is_empty())
         .collect();
     tags.sort();
     tags.dedup();
     tags.join(", ")
+}
+
+/// Simple English singularization for tag normalization.
+fn singularize(s: &str) -> String {
+    let s = s.trim();
+    if s.len() <= 2 { return s.to_string(); }
+    // "ies" → "y" (e.g. "entries" → "entry")
+    if s.ends_with("ies") && s.len() > 4 {
+        return format!("{}y", &s[..s.len() - 3]);
+    }
+    // "sses" → "ss" (e.g. "classes")
+    if s.ends_with("sses") {
+        return s[..s.len() - 2].to_string();
+    }
+    // trailing "s" but not "ss" or "us" or "is"
+    if s.ends_with('s') && !s.ends_with("ss") && !s.ends_with("us") && !s.ends_with("is") {
+        return s[..s.len() - 1].to_string();
+    }
+    s.to_string()
 }
 
 /// Check if provided tags are close to existing ones (catch "bugs" vs "bug").
@@ -169,21 +191,34 @@ fn collect_tag_vocab(dir: &Path) -> Option<std::collections::BTreeMap<String, us
     Some(tags)
 }
 
-/// Check if similar content already exists. Returns existing entry text if >70% word overlap.
+/// Common words to exclude from dupe detection (they inflate overlap on topic-related entries).
+const STOP_WORDS: &[&str] = &[
+    "that", "this", "with", "from", "have", "been", "were", "will", "when",
+    "which", "their", "there", "about", "would", "could", "should", "into",
+    "also", "each", "does", "just", "more", "than", "then", "them", "some",
+    "only", "other", "very", "after", "before", "most", "same", "both",
+    "used", "uses", "using", "need", "added", "file", "path", "type", "name",
+];
+
+/// Check if similar content already exists. Returns existing entry text if >85% unique-word overlap.
+/// Uses deduplicated significant words (≥5 chars, no stop words) for better precision.
 fn check_dupe(filepath: &Path, new_text: &str) -> Option<String> {
     let content = fs::read_to_string(filepath).ok()?;
     let new_lower = new_text.to_lowercase();
+    let mut seen = std::collections::HashSet::new();
     let words: Vec<&str> = new_lower.split_whitespace()
-        .filter(|w| w.len() >= 4)
+        .filter(|w| w.len() >= 5)
+        .filter(|w| !STOP_WORDS.contains(w))
+        .filter(|w| seen.insert(*w))
         .collect();
-    if words.len() < 3 { return None; }
+    if words.len() < 4 { return None; }
 
     let sections = crate::delete::split_sections(&content);
     for (header, body) in &sections {
         let body_lower = body.to_lowercase();
         let matches = words.iter().filter(|w| body_lower.contains(**w)).count();
         let ratio = matches as f64 / words.len() as f64;
-        if ratio > 0.7 {
+        if ratio > 0.85 {
             let preview = body.trim().lines().next().unwrap_or("").trim();
             let short = if preview.len() > 100 {
                 let mut end = 100;

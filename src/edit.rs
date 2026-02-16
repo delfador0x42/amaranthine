@@ -24,7 +24,7 @@ pub fn run(dir: &Path, topic: &str, needle: &str, new_text: &str) -> Result<Stri
 
     let body_with_marker = add_modified_marker(new_text);
     let result = crate::delete::rebuild_file(&content, &sections, None, Some((idx, &body_with_marker)));
-    fs::write(&filepath, &result).map_err(|e| e.to_string())?;
+    crate::config::atomic_write(&filepath, &result)?;
     Ok(format!("updated entry matching \"{needle}\" in {filename}.md"))
 }
 
@@ -48,7 +48,7 @@ pub fn run_by_index(dir: &Path, topic: &str, idx: usize, new_text: &str) -> Resu
 
     let body_with_marker = add_modified_marker(new_text);
     let result = crate::delete::rebuild_file(&content, &sections, None, Some((idx, &body_with_marker)));
-    fs::write(&filepath, &result).map_err(|e| e.to_string())?;
+    crate::config::atomic_write(&filepath, &result)?;
     Ok(format!("updated entry [{idx}] in {filename}.md"))
 }
 
@@ -76,7 +76,7 @@ pub fn append(dir: &Path, topic: &str, needle: &str, extra: &str) -> Result<Stri
     let existing = sections[idx].1.trim();
     let combined = format!("{existing}\n{extra}");
     let result = crate::delete::rebuild_file(&content, &sections, None, Some((idx, &combined)));
-    fs::write(&filepath, &result).map_err(|e| e.to_string())?;
+    crate::config::atomic_write(&filepath, &result)?;
     Ok(format!("appended to entry matching \"{needle}\" in {filename}.md"))
 }
 
@@ -101,7 +101,7 @@ pub fn append_by_index(dir: &Path, topic: &str, idx: usize, extra: &str) -> Resu
     let existing = sections[idx].1.trim();
     let combined = format!("{existing}\n{extra}");
     let result = crate::delete::rebuild_file(&content, &sections, None, Some((idx, &combined)));
-    fs::write(&filepath, &result).map_err(|e| e.to_string())?;
+    crate::config::atomic_write(&filepath, &result)?;
     Ok(format!("appended to entry [{idx}] in {filename}.md"))
 }
 

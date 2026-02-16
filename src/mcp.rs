@@ -74,11 +74,41 @@ pub fn run(dir: &Path) -> Result<(), String> {
 
 fn do_reload() {
     use std::os::unix::process::CommandExt;
-    std::env::set_var("AMARANTHINE_REEXEC", "1");
+
+    // If running from an installed location, copy fresh build + codesign
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return,
     };
+    let src = exe.parent()
+        .and_then(|p| p.parent())
+        .and_then(|_| {
+            // Find the cargo project root relative to the binary
+            let manifest = std::env::var("AMARANTHINE_SRC").ok()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    // Default: look for target/release relative to common locations
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    std::path::PathBuf::from(home).join("wudan/dojo/crash3/amaranthine")
+                });
+            let release = manifest.join("target/release/amaranthine");
+            if release.exists() { Some(release) } else { None }
+        });
+
+    if let Some(src_bin) = src {
+        // Copy new binary over the running one
+        if let Err(e) = std::fs::copy(&src_bin, &exe) {
+            eprintln!("reload: copy failed: {e}");
+        } else {
+            // Ad-hoc codesign so taskgate doesn't kill it
+            let _ = std::process::Command::new("codesign")
+                .args(["-s", "-", "-f"])
+                .arg(&exe)
+                .output();
+        }
+    }
+
+    std::env::set_var("AMARANTHINE_REEXEC", "1");
     let args: Vec<String> = std::env::args().skip(1).collect();
     // exec replaces this process — only returns on failure
     let _err = std::process::Command::new(&exe).args(&args).exec();
@@ -172,7 +202,8 @@ fn tool_list() -> Value {
             &["topic", "text"],
             &[("topic", "string", "Topic name"),
               ("text", "string", "Entry content"),
-              ("tags", "string", "Comma-separated tags (e.g. 'bug,p0,iris')")]),
+              ("tags", "string", "Comma-separated tags (e.g. 'bug,p0,iris')"),
+              ("force", "string", "Set to 'true' to bypass duplicate detection")]),
         tool("append", "Add text to the last entry in a topic (no new timestamp). Use when adding related info to a recent entry.",
             &["topic", "text"],
             &[("topic", "string", "Topic name"),
@@ -311,7 +342,9 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
             let text = arg_str(args, "text");
             let tags = arg_str(args, "tags");
             let tags = if tags.is_empty() { None } else { Some(tags.as_str()) };
-            crate::store::run_with_tags(dir, &topic, &text, tags)
+            let force = arg_str(args, "force");
+            let force = force == "true" || force == "1";
+            crate::store::run_full(dir, &topic, &text, tags, force)
         }
         "append" => {
             let topic = arg_str(args, "topic");

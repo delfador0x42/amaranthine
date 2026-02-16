@@ -26,7 +26,7 @@ pub fn run(dir: &Path, apply: bool) -> Result<String, String> {
         if needs_fix && apply {
             let now = crate::time::LocalTime::now();
             let fixed = fix_timestamps(&content, &format!("{now}"));
-            fs::write(path, &fixed).map_err(|e| e.to_string())?;
+            crate::config::atomic_write(path, &fixed)?;
             total_fixed += 1;
             let _ = writeln!(out, "  [{name}] fixed timestamps");
         }

@@ -27,7 +27,7 @@ pub fn run(dir: &Path, topic: &str, last: bool, all: bool, match_str: Option<&st
     match content.rfind("\n## ") {
         Some(pos) => {
             let trimmed = content[..pos].trim_end();
-            fs::write(&filepath, format!("{trimmed}\n")).map_err(|e| e.to_string())?;
+            crate::config::atomic_write(&filepath, &format!("{trimmed}\n"))?;
             let remaining = trimmed.matches("\n## ").count();
             Ok(format!("removed last entry from {filename}.md ({remaining} remaining)"))
         }
@@ -54,7 +54,7 @@ pub fn run_by_index(dir: &Path, topic: &str, idx: usize) -> Result<String, Strin
     }
 
     let result = rebuild_file(&content, &sections, Some(idx), None);
-    fs::write(&filepath, &result).map_err(|e| e.to_string())?;
+    crate::config::atomic_write(&filepath, &result)?;
 
     let remaining = result.matches("\n## ").count();
     Ok(format!("removed entry [{idx}] from {filename}.md ({remaining} remaining)"))
@@ -72,7 +72,7 @@ fn delete_matching(filepath: &Path, filename: &str, needle: &str) -> Result<Stri
     };
 
     let result = rebuild_file(&content, &sections, Some(idx), None);
-    fs::write(filepath, &result).map_err(|e| e.to_string())?;
+    crate::config::atomic_write(filepath, &result)?;
 
     let remaining = result.matches("\n## ").count();
     Ok(format!("removed entry matching \"{needle}\" from {filename}.md ({remaining} remaining)"))

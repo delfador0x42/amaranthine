@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
@@ -44,6 +45,22 @@ pub fn list_topic_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
 /// All searchable .md files (excludes INDEX.md only).
 pub fn list_search_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     list_md_files(dir, &["INDEX.md"])
+}
+
+/// Atomic file write: write to .tmp, fsync, rename over target.
+/// Prevents corruption if process dies mid-write.
+pub fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
+    let tmp = path.with_extension("md.tmp");
+    let mut f = fs::File::create(&tmp)
+        .map_err(|e| format!("can't create {}: {e}", tmp.display()))?;
+    f.write_all(data.as_bytes())
+        .map_err(|e| format!("write failed: {e}"))?;
+    f.sync_all()
+        .map_err(|e| format!("fsync failed: {e}"))?;
+    drop(f);
+    fs::rename(&tmp, path)
+        .map_err(|e| format!("rename failed: {e}"))?;
+    Ok(())
 }
 
 fn list_md_files(dir: &Path, exclude: &[&str]) -> Result<Vec<PathBuf>, String> {
