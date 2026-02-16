@@ -88,7 +88,7 @@ fn main() {
             let tag = parse_flag_str(cmd, "--tag");
             let or_mode = cmd.iter().any(|a| a == "--or");
             let mode = if or_mode { search::SearchMode::Or } else { search::SearchMode::And };
-            let filter = search::Filter { after, before, tag, mode };
+            let filter = search::Filter { after, before, tag, topic: None, mode };
             let skip = ["--brief", "-b", "--count", "-c", "--topics", "-t",
                         "--limit", "--after", "--before", "--tag", "--or"];
             let query_parts: Vec<&str> = cmd[1..].iter()

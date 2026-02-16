@@ -1,6 +1,16 @@
 use crate::json::Value;
 use std::io::{self, BufRead, Write as _};
 use std::path::Path;
+use std::sync::Mutex;
+
+/// Session log: one-line summaries of stores this session.
+static SESSION_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn log_session(msg: String) {
+    if let Ok(mut log) = SESSION_LOG.lock() {
+        log.push(msg);
+    }
+}
 
 pub fn run(dir: &Path) -> Result<(), String> {
     let stdin = io::stdin();
@@ -39,7 +49,6 @@ pub fn run(dir: &Path) -> Result<(), String> {
                 let _ = out.flush();
                 drop(out);
                 do_reload();
-                // exec only returns on failure — keep running
                 continue;
             }
         }
@@ -75,7 +84,6 @@ pub fn run(dir: &Path) -> Result<(), String> {
 fn do_reload() {
     use std::os::unix::process::CommandExt;
 
-    // If running from an installed location, copy fresh build + codesign
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return,
@@ -83,11 +91,9 @@ fn do_reload() {
     let src = exe.parent()
         .and_then(|p| p.parent())
         .and_then(|_| {
-            // Find the cargo project root relative to the binary
             let manifest = std::env::var("AMARANTHINE_SRC").ok()
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| {
-                    // Default: look for target/release relative to common locations
                     let home = std::env::var("HOME").unwrap_or_default();
                     std::path::PathBuf::from(home).join("wudan/dojo/crash3/amaranthine")
                 });
@@ -96,11 +102,9 @@ fn do_reload() {
         });
 
     if let Some(src_bin) = src {
-        // Copy new binary over the running one
         if let Err(e) = std::fs::copy(&src_bin, &exe) {
             eprintln!("reload: copy failed: {e}");
         } else {
-            // Ad-hoc codesign so taskgate doesn't kill it
             let _ = std::process::Command::new("codesign")
                 .args(["-s", "-", "-f"])
                 .arg(&exe)
@@ -110,9 +114,7 @@ fn do_reload() {
 
     std::env::set_var("AMARANTHINE_REEXEC", "1");
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // exec replaces this process — only returns on failure
     let _err = std::process::Command::new(&exe).args(&args).exec();
-    // If we get here, exec failed — remove env var and continue
     std::env::remove_var("AMARANTHINE_REEXEC");
     eprintln!("reload failed: {_err}");
 }
@@ -125,7 +127,7 @@ fn init_result() -> Value {
         ])),
         ("serverInfo".into(), Value::Obj(vec![
             ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("1.4.0".into())),
+            ("version".into(), Value::Str("1.5.0".into())),
         ])),
     ])
 }
@@ -177,22 +179,74 @@ fn tool(name: &str, desc: &str, req: &[&str], props: &[(&str, &str, &str)]) -> V
     ])
 }
 
+/// Build a batch_store tool definition with proper array-of-objects schema.
+fn batch_store_tool() -> Value {
+    let entry_schema = Value::Obj(vec![
+        ("type".into(), Value::Str("object".into())),
+        ("properties".into(), Value::Obj(vec![
+            ("topic".into(), Value::Obj(vec![
+                ("type".into(), Value::Str("string".into())),
+                ("description".into(), Value::Str("Topic name".into())),
+            ])),
+            ("text".into(), Value::Obj(vec![
+                ("type".into(), Value::Str("string".into())),
+                ("description".into(), Value::Str("Entry content".into())),
+            ])),
+            ("tags".into(), Value::Obj(vec![
+                ("type".into(), Value::Str("string".into())),
+                ("description".into(), Value::Str("Comma-separated tags".into())),
+            ])),
+        ])),
+        ("required".into(), Value::Arr(vec![
+            Value::Str("topic".into()), Value::Str("text".into()),
+        ])),
+    ]);
+
+    Value::Obj(vec![
+        ("name".into(), Value::Str("batch_store".into())),
+        ("description".into(), Value::Str(
+            "Store multiple entries in one call. Each entry: {topic, text, tags?}. Faster than sequential store calls.".into()
+        )),
+        ("inputSchema".into(), Value::Obj(vec![
+            ("type".into(), Value::Str("object".into())),
+            ("properties".into(), Value::Obj(vec![
+                ("entries".into(), Value::Obj(vec![
+                    ("type".into(), Value::Str("array".into())),
+                    ("items".into(), entry_schema),
+                    ("description".into(), Value::Str("Array of entries to store".into())),
+                ])),
+                ("verbose".into(), Value::Obj(vec![
+                    ("type".into(), Value::Str("string".into())),
+                    ("description".into(), Value::Str(
+                        "Set to 'true' for per-entry details (default: terse count only)".into()
+                    )),
+                ])),
+            ])),
+            ("required".into(), Value::Arr(vec![Value::Str("entries".into())])),
+        ])),
+    ])
+}
+
 /// Shared search filter properties for tool definitions.
 const SEARCH_FILTER_PROPS: &[(&str, &str, &str)] = &[
     ("limit", "string", "Max results to return (default: unlimited)"),
     ("after", "string", "Only entries on/after date (YYYY-MM-DD or 'today'/'yesterday'/'this-week')"),
     ("before", "string", "Only entries on/before date (YYYY-MM-DD or 'today'/'yesterday')"),
     ("tag", "string", "Only entries with this tag"),
+    ("topic", "string", "Limit search to a single topic"),
     ("mode", "string", "Search mode: 'and' (default, all terms must match) or 'or' (any term matches)"),
 ];
 
 fn tool_list() -> Value {
-    // Build search props: query + shared filter props
-    let search_props: Vec<(&str, &str, &str)> = std::iter::once(("query", "string", "Search query"))
+    // Build search props: query + detail + shared filter props
+    let search_props: Vec<(&str, &str, &str)> = [
+        ("query", "string", "Search query"),
+        ("detail", "string", "Result detail level: 'full', 'medium' (default), or 'brief'"),
+    ].into_iter()
         .chain(SEARCH_FILTER_PROPS.iter().copied())
         .collect();
 
-    // Count-only doesn't need limit
+    // Count-only doesn't need limit or detail
     let search_count_props: Vec<(&str, &str, &str)> = std::iter::once(("query", "string", "Search query"))
         .chain(SEARCH_FILTER_PROPS.iter().copied().filter(|(n, _, _)| *n != "limit"))
         .collect();
@@ -209,20 +263,17 @@ fn tool_list() -> Value {
             &["topic", "text"],
             &[("topic", "string", "Topic name"),
               ("text", "string", "Text to append")]),
-        tool("batch_store", "Store multiple entries in one call. Each entry: {topic, text, tags?}. Faster than sequential store calls.",
-            &["entries"],
-            &[("entries", "string", "JSON array of objects: [{\"topic\":\"...\",\"text\":\"...\",\"tags\":\"...\"}]"),
-              ("terse", "string", "Set to 'true' for minimal response (just count)")]),
+        batch_store_tool(),
         tool("search", "Search all knowledge files (case-insensitive). Splits CamelCase/snake_case. Falls back to OR when AND finds nothing.",
-            &["query"], &search_props),
+            &[], &search_props),
         tool("search_brief", "Quick search: just topic names + first matching line per hit",
-            &["query"], &search_props),
+            &[], &search_props),
         tool("search_medium", "Medium search: topic + timestamp + first 2 content lines per hit. Between brief and full.",
-            &["query"], &search_props),
+            &[], &search_props),
         tool("search_count", "Count matching sections without returning content. Fast way to gauge query scope.",
-            &["query"], &search_count_props),
+            &[], &search_count_props),
         tool("search_topics", "Show which topics matched and how many hits per topic. Best first step before deep search.",
-            &["query"], &search_count_props),
+            &[], &search_count_props),
         tool("context", "Session briefing: topics + recent entries (7 days) + optional search",
             &[],
             &[("query", "string", "Optional search query"),
@@ -241,11 +292,12 @@ fn tool_list() -> Value {
         tool("delete_topic", "Delete an entire topic and all its entries",
             &["topic"],
             &[("topic", "string", "Topic name")]),
-        tool("append_entry", "Add text to an existing entry found by substring match or index (keeps timestamp, preserves body)",
+        tool("append_entry", "Add text to an existing entry found by substring match, index, or tag (keeps timestamp, preserves body)",
             &["topic", "text"],
             &[("topic", "string", "Topic name"),
               ("match_str", "string", "Substring to find the entry to append to"),
               ("index", "string", "Entry index number (from list_entries)"),
+              ("tag", "string", "Append to most recent entry with this tag"),
               ("text", "string", "Text to append to the entry")]),
         tool("update_entry", "Overwrite an existing entry's text (keeps timestamp). Adds [modified] marker.",
             &["topic", "text"],
@@ -299,6 +351,8 @@ fn tool_list() -> Value {
               ("match_str", "string", "Substring to find the entry"),
               ("tags", "string", "Comma-separated tags to add"),
               ("remove", "string", "Comma-separated tags to remove")]),
+        tool("session", "Show what was stored this session. Tracks all store/batch_store calls since server started.",
+            &[], &[]),
         tool("_reload", "Re-exec the server binary to pick up code changes. Sends tools/list_changed notification after reload.",
             &[], &[]),
     ])
@@ -308,6 +362,7 @@ fn build_filter(args: Option<&Value>) -> crate::search::Filter {
     let after = resolve_date_shortcut(&arg_str(args, "after"));
     let before = resolve_date_shortcut(&arg_str(args, "before"));
     let tag = arg_str(args, "tag");
+    let topic = arg_str(args, "topic");
     let mode = match arg_str(args, "mode").as_str() {
         "or" => crate::search::SearchMode::Or,
         _ => crate::search::SearchMode::And,
@@ -316,6 +371,7 @@ fn build_filter(args: Option<&Value>) -> crate::search::Filter {
         after: if after.is_empty() { None } else { crate::time::parse_date_days(&after) },
         before: if before.is_empty() { None } else { crate::time::parse_date_days(&before) },
         tag: if tag.is_empty() { None } else { Some(tag) },
+        topic: if topic.is_empty() { None } else { Some(topic) },
         mode,
     }
 }
@@ -343,7 +399,6 @@ fn resolve_date_shortcut(s: &str) -> String {
 
 /// Convert days-since-epoch back to YYYY-MM-DD.
 fn days_to_date(z: i64) -> String {
-    // Inverse of civil_to_days (Howard Hinnant's algorithm)
     let z = z + 719468;
     let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
     let doe = (z - era * 146097) as u64;
@@ -367,6 +422,8 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
             let force = arg_bool(args, "force");
             let terse = arg_bool(args, "terse");
             let result = crate::store::run_full(dir, &topic, &text, tags, force)?;
+            log_session(format!("[{}] {}", topic,
+                result.lines().next().unwrap_or("stored")));
             if terse {
                 Ok(result.lines().next().unwrap_or(&result).to_string())
             } else {
@@ -379,15 +436,15 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
             crate::store::append(dir, &topic, &text)
         }
         "batch_store" => {
-            let raw = arg_str(args, "entries");
-            let terse = arg_bool(args, "terse");
-            let arr = crate::json::parse(&raw).map_err(|e| format!("invalid JSON: {e}"))?;
-            let items = match &arr {
-                Value::Arr(v) => v,
-                _ => return Err("entries must be a JSON array".into()),
-            };
+            let verbose = arg_bool(args, "verbose");
+            // Native array: entries come as Value::Arr directly from MCP
+            let items = args.and_then(|a| a.get("entries"))
+                .and_then(|v| match v { Value::Arr(a) => Some(a), _ => None })
+                .ok_or("entries must be an array")?;
             let mut ok_count = 0;
             let mut results = Vec::new();
+            // Intra-batch dedup: track (topic_lower, text_prefix) pairs
+            let mut seen: Vec<(String, String)> = Vec::new();
             for (i, item) in items.iter().enumerate() {
                 let topic = item.get("topic").and_then(|v| v.as_str()).unwrap_or("");
                 let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
@@ -396,29 +453,45 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
                     results.push(format!("  [{}] skipped: missing topic or text", i + 1));
                     continue;
                 }
+                // Dedup: first 60 chars of text + topic
+                let key = (
+                    topic.to_lowercase(),
+                    text.chars().take(60).collect::<String>().to_lowercase(),
+                );
+                if seen.iter().any(|s| s.0 == key.0 && s.1 == key.1) {
+                    results.push(format!("  [{}] skipped: duplicate within batch", i + 1));
+                    continue;
+                }
+                seen.push(key);
                 match crate::store::run_full(dir, topic, text, tags, false) {
                     Ok(msg) => {
                         ok_count += 1;
                         let first = msg.lines().next().unwrap_or(&msg);
                         results.push(format!("  [{}] {}", i + 1, first));
+                        log_session(format!("[{}] {}", topic, first));
                     }
                     Err(e) => {
                         let first = e.lines().next().unwrap_or(&e);
-                        results.push(format!("  [{}] {}", i + 1, first));
+                        results.push(format!("  [{}] err: {}", i + 1, first));
                     }
                 }
             }
-            if terse {
-                Ok(format!("batch: {ok_count}/{} stored", items.len()))
-            } else {
+            if verbose {
                 Ok(format!("batch: {ok_count}/{} stored\n{}", items.len(), results.join("\n")))
+            } else {
+                Ok(format!("batch: {ok_count}/{} stored", items.len()))
             }
         }
         "search" => {
             let query = arg_str(args, "query");
             let limit = arg_str(args, "limit").parse::<usize>().ok();
+            let detail = arg_str(args, "detail");
             let filter = build_filter(args);
-            crate::search::run(dir, &query, true, limit, &filter)
+            match detail.as_str() {
+                "full" => crate::search::run(dir, &query, true, limit, &filter),
+                "brief" => crate::search::run_brief(dir, &query, limit, &filter),
+                _ => crate::search::run_medium(dir, &query, limit, &filter),
+            }
         }
         "search_brief" => {
             let query = arg_str(args, "query");
@@ -487,11 +560,14 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
             let text = arg_str(args, "text");
             let idx_str = arg_str(args, "index");
             let needle = arg_str(args, "match_str");
+            let tag = arg_str(args, "tag");
 
             if !idx_str.is_empty() {
                 let idx: usize = idx_str.parse()
                     .map_err(|_| format!("invalid index: '{idx_str}'"))?;
                 crate::edit::append_by_index(dir, &topic, idx, &text)
+            } else if !tag.is_empty() {
+                crate::edit::append_by_tag(dir, &topic, &tag, &text)
             } else {
                 crate::edit::append(dir, &topic, &needle, &text)
             }
@@ -577,6 +653,18 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
             let add = if add_tags.is_empty() { None } else { Some(add_tags.as_str()) };
             let rm = if rm_tags.is_empty() { None } else { Some(rm_tags.as_str()) };
             crate::edit::tag_entry(dir, &topic, idx, needle, add, rm)
+        }
+        "session" => {
+            let log = SESSION_LOG.lock().map_err(|e| e.to_string())?;
+            if log.is_empty() {
+                Ok("no stores this session".into())
+            } else {
+                let mut out = format!("{} stores this session:\n", log.len());
+                for entry in log.iter() {
+                    out.push_str(&format!("  {entry}\n"));
+                }
+                Ok(out)
+            }
         }
         _ => Err(format!("unknown tool: {name}")),
     }

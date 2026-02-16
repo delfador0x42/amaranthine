@@ -105,6 +105,44 @@ pub fn append_by_index(dir: &Path, topic: &str, idx: usize, extra: &str) -> Resu
     Ok(format!("appended to entry [{idx}] in {filename}.md"))
 }
 
+/// Append text to the most recent entry with a given tag.
+pub fn append_by_tag(dir: &Path, topic: &str, tag: &str, extra: &str) -> Result<String, String> {
+    let _lock = crate::lock::FileLock::acquire(dir)?;
+    let filename = crate::config::sanitize_topic(topic);
+    let filepath = dir.join(format!("{filename}.md"));
+
+    if !filepath.exists() {
+        return Err(format!("{filename}.md not found"));
+    }
+
+    let content = fs::read_to_string(&filepath).map_err(|e| e.to_string())?;
+    let sections = crate::delete::split_sections(&content);
+    let tag_lower = tag.to_lowercase();
+
+    // Search in reverse (most recent first)
+    let idx = sections.iter().enumerate().rev().find_map(|(i, (_, body))| {
+        for line in body.lines() {
+            if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
+                if inner.split(',').any(|t| t.trim().to_lowercase() == tag_lower) {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    });
+
+    let idx = match idx {
+        Some(i) => i,
+        None => return Err(format!("no entry with tag '{tag}' in {filename}.md")),
+    };
+
+    let existing = sections[idx].1.trim();
+    let combined = format!("{existing}\n{extra}");
+    let result = crate::delete::rebuild_file(&content, &sections, None, Some((idx, &combined)));
+    crate::config::atomic_write(&filepath, &result)?;
+    Ok(format!("appended to most recent entry tagged '{tag}' in {filename}.md"))
+}
+
 /// Add a [modified: timestamp] marker to updated text.
 fn add_modified_marker(text: &str) -> String {
     let now = crate::time::LocalTime::now();

@@ -2,11 +2,12 @@ use std::fmt::Write;
 use std::fs;
 use std::path::Path;
 
-/// Filter options for search (date range + tag + mode)
+/// Filter options for search (date range + tag + topic scope + mode)
 pub struct Filter {
     pub after: Option<i64>,  // days since epoch
     pub before: Option<i64>,
     pub tag: Option<String>,
+    pub topic: Option<String>,
     pub mode: SearchMode,
 }
 
@@ -14,8 +15,19 @@ pub struct Filter {
 pub enum SearchMode { And, Or }
 
 impl Filter {
-    pub fn none() -> Self { Self { after: None, before: None, tag: None, mode: SearchMode::And } }
-    pub fn is_active(&self) -> bool { self.after.is_some() || self.before.is_some() || self.tag.is_some() }
+    pub fn none() -> Self { Self { after: None, before: None, tag: None, topic: None, mode: SearchMode::And } }
+    pub fn is_active(&self) -> bool { self.after.is_some() || self.before.is_some() || self.tag.is_some() || self.topic.is_some() }
+}
+
+/// Resolve search files — limit to one topic if filter.topic is set.
+pub fn search_files(dir: &Path, filter: &Filter) -> Result<Vec<std::path::PathBuf>, String> {
+    if let Some(ref topic) = filter.topic {
+        let f = crate::config::sanitize_topic(topic);
+        let p = dir.join(format!("{f}.md"));
+        if p.exists() { Ok(vec![p]) } else { Err(format!("topic '{topic}' not found")) }
+    } else {
+        crate::config::list_search_files(dir)
+    }
 }
 
 pub fn run(dir: &Path, query: &str, plain: bool, limit: Option<usize>, filter: &Filter) -> Result<String, String> {
@@ -32,7 +44,10 @@ pub fn run_medium(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter
     }
 
     let terms = query_terms(query);
-    let files = crate::config::list_search_files(dir)?;
+    if terms.is_empty() && !filter.is_active() {
+        return Err("provide a query or filter (tag, topic, date range)".into());
+    }
+    let files = search_files(dir, filter)?;
 
     // Phase 1: read + pre-filter + lowercase
     let mut corpus: Vec<PrepSection> = Vec::new();
@@ -132,7 +147,10 @@ pub fn run_topics(dir: &Path, query: &str, filter: &Filter) -> Result<String, St
         return Err(format!("{} not found", dir.display()));
     }
     let terms = query_terms(query);
-    let files = crate::config::list_search_files(dir)?;
+    if terms.is_empty() && !filter.is_active() {
+        return Err("provide a query or filter (tag, topic, date range)".into());
+    }
+    let files = search_files(dir, filter)?;
 
     let count_hits = |mode: SearchMode| -> Vec<(String, usize)> {
         let mut hits = Vec::new();
@@ -176,7 +194,10 @@ pub fn count(dir: &Path, query: &str, filter: &Filter) -> Result<String, String>
         return Err(format!("{} not found", dir.display()));
     }
     let terms = query_terms(query);
-    let files = crate::config::list_search_files(dir)?;
+    if terms.is_empty() && !filter.is_active() {
+        return Err("provide a query or filter (tag, topic, date range)".into());
+    }
+    let files = search_files(dir, filter)?;
 
     let do_count = |mode: SearchMode| -> (usize, usize) {
         let mut total = 0;
@@ -264,7 +285,10 @@ fn search(dir: &Path, query: &str, plain: bool, brief: bool, limit: Option<usize
     }
 
     let terms = query_terms(query);
-    let files = crate::config::list_search_files(dir)?;
+    if terms.is_empty() && !filter.is_active() {
+        return Err("provide a query or filter (tag, topic, date range)".into());
+    }
+    let files = search_files(dir, filter)?;
 
     // Phase 1: read all files once, pre-filter, pre-compute lowercase
     let mut corpus: Vec<PrepSection> = Vec::new();
