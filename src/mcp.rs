@@ -208,9 +208,14 @@ fn tool_list() -> Value {
             &["topic", "text"],
             &[("topic", "string", "Topic name"),
               ("text", "string", "Text to append")]),
+        tool("batch_store", "Store multiple entries in one call. Each entry: {topic, text, tags?}. Faster than sequential store calls.",
+            &["entries"],
+            &[("entries", "string", "JSON array of objects: [{\"topic\":\"...\",\"text\":\"...\",\"tags\":\"...\"}]")]),
         tool("search", "Search all knowledge files (case-insensitive). Splits CamelCase/snake_case. Falls back to OR when AND finds nothing.",
             &["query"], &search_props),
         tool("search_brief", "Quick search: just topic names + first matching line per hit",
+            &["query"], &search_props),
+        tool("search_medium", "Medium search: topic + timestamp + first 2 content lines per hit. Between brief and full.",
             &["query"], &search_props),
         tool("search_count", "Count matching sections without returning content. Fast way to gauge query scope.",
             &["query"], &search_count_props),
@@ -351,6 +356,36 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
             let text = arg_str(args, "text");
             crate::store::append(dir, &topic, &text)
         }
+        "batch_store" => {
+            let raw = arg_str(args, "entries");
+            let arr = crate::json::parse(&raw).map_err(|e| format!("invalid JSON: {e}"))?;
+            let items = match &arr {
+                Value::Arr(v) => v,
+                _ => return Err("entries must be a JSON array".into()),
+            };
+            let mut results = Vec::new();
+            for (i, item) in items.iter().enumerate() {
+                let topic = item.get("topic").and_then(|v| v.as_str()).unwrap_or("");
+                let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let tags = item.get("tags").and_then(|v| v.as_str());
+                if topic.is_empty() || text.is_empty() {
+                    results.push(format!("  [{}] skipped: missing topic or text", i + 1));
+                    continue;
+                }
+                match crate::store::run_full(dir, topic, text, tags, false) {
+                    Ok(msg) => {
+                        // Extract just the first line (stored confirmation)
+                        let first = msg.lines().next().unwrap_or(&msg);
+                        results.push(format!("  [{}] {}", i + 1, first));
+                    }
+                    Err(e) => {
+                        let first = e.lines().next().unwrap_or(&e);
+                        results.push(format!("  [{}] {}", i + 1, first));
+                    }
+                }
+            }
+            Ok(format!("batch: {}/{} stored\n{}", results.len(), items.len(), results.join("\n")))
+        }
         "search" => {
             let query = arg_str(args, "query");
             let limit = arg_str(args, "limit").parse::<usize>().ok();
@@ -362,6 +397,12 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
             let limit = arg_str(args, "limit").parse::<usize>().ok();
             let filter = build_filter(args);
             crate::search::run_brief(dir, &query, limit, &filter)
+        }
+        "search_medium" => {
+            let query = arg_str(args, "query");
+            let limit = arg_str(args, "limit").parse::<usize>().ok();
+            let filter = build_filter(args);
+            crate::search::run_medium(dir, &query, limit, &filter)
         }
         "search_count" => {
             let query = arg_str(args, "query");

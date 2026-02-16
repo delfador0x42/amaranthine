@@ -18,12 +18,9 @@ pub fn run_full(dir: &Path, topic: &str, text: &str, tags: Option<&str>, force: 
     let filename = crate::config::sanitize_topic(topic);
     let filepath = dir.join(format!("{filename}.md"));
 
-    // Check for duplicates — warn/block if high overlap (skip with force)
-    if !force {
-        if let Some(existing) = check_dupe(&filepath, &text) {
-            return Err(format!("blocked: similar entry already exists in {filename}.md\n  existing: {existing}\nUse update_entry or append_entry to modify it, or pass force=true to override."));
-        }
-    }
+    // Check for duplicates — warn (but still store) if high overlap (skip with force)
+    let dupe_warn = if !force { check_dupe(&filepath, &text) } else { None };
+
     // Suggest existing topics if this is a new topic
     let topic_hint = if !filepath.exists() { suggest_topic(dir, &filename) } else { None };
 
@@ -68,6 +65,9 @@ pub fn run_full(dir: &Path, topic: &str, text: &str, tags: Option<&str>, force: 
     }
     if let Some(tw) = tag_warn {
         msg.push_str(&format!("\n  tag note: {tw}"));
+    }
+    if let Some(ref dw) = dupe_warn {
+        msg.push_str(&format!("\n  dupe warning: similar entry exists — {dw}"));
     }
     // Suggest tags from existing vocabulary if none provided
     if tags.is_none() {
@@ -131,7 +131,7 @@ fn normalize_tags(raw: &str) -> String {
 /// Simple English singularization for tag normalization.
 fn singularize(s: &str) -> String {
     let s = s.trim();
-    if s.len() <= 2 { return s.to_string(); }
+    if s.len() <= 3 { return s.to_string(); }
     // "ies" → "y" (e.g. "entries" → "entry")
     if s.ends_with("ies") && s.len() > 4 {
         return format!("{}y", &s[..s.len() - 3]);
@@ -158,11 +158,12 @@ fn check_similar_tags(dir: &Path, raw: &str) -> Option<String> {
     let mut warnings = Vec::new();
     for tag in &new_tags {
         if existing.contains_key(tag) { continue; }
-        // Check for near-matches: one is prefix of other, or differ by trailing 's'
+        if tag.len() < 4 { continue; } // skip short tags — too many false matches
         for (existing_tag, count) in &existing {
-            let similar = tag.starts_with(existing_tag.as_str())
-                || existing_tag.starts_with(tag.as_str())
-                || (tag.ends_with('s') && &tag[..tag.len()-1] == existing_tag.as_str())
+            if *count < 3 { continue; } // only suggest well-established tags
+            if existing_tag.len() < 4 { continue; }
+            // Only flag genuine singular/plural differences (not prefix overlap)
+            let similar = (tag.ends_with('s') && &tag[..tag.len()-1] == existing_tag.as_str())
                 || (existing_tag.ends_with('s') && &existing_tag[..existing_tag.len()-1] == tag.as_str());
             if similar {
                 warnings.push(format!("'{tag}' — did you mean '{existing_tag}' ({count} uses)?"));
@@ -200,25 +201,25 @@ const STOP_WORDS: &[&str] = &[
     "used", "uses", "using", "need", "added", "file", "path", "type", "name",
 ];
 
-/// Check if similar content already exists. Returns existing entry text if >85% unique-word overlap.
-/// Uses deduplicated significant words (≥5 chars, no stop words) for better precision.
+/// Check if similar content already exists. Returns existing entry text if >90% unique-word overlap.
+/// Uses deduplicated significant words (≥6 chars, no stop words) for better precision.
 fn check_dupe(filepath: &Path, new_text: &str) -> Option<String> {
     let content = fs::read_to_string(filepath).ok()?;
     let new_lower = new_text.to_lowercase();
     let mut seen = std::collections::HashSet::new();
     let words: Vec<&str> = new_lower.split_whitespace()
-        .filter(|w| w.len() >= 5)
+        .filter(|w| w.len() >= 6)
         .filter(|w| !STOP_WORDS.contains(w))
         .filter(|w| seen.insert(*w))
         .collect();
-    if words.len() < 4 { return None; }
+    if words.len() < 6 { return None; }
 
     let sections = crate::delete::split_sections(&content);
     for (header, body) in &sections {
         let body_lower = body.to_lowercase();
         let matches = words.iter().filter(|w| body_lower.contains(**w)).count();
         let ratio = matches as f64 / words.len() as f64;
-        if ratio > 0.85 {
+        if ratio > 0.90 {
             let preview = body.trim().lines().next().unwrap_or("").trim();
             let short = if preview.len() > 100 {
                 let mut end = 100;

@@ -26,6 +26,102 @@ pub fn run_brief(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter)
     search(dir, query, true, true, limit, filter)
 }
 
+pub fn run_medium(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter) -> Result<String, String> {
+    if !dir.exists() {
+        return Err(format!("{} not found", dir.display()));
+    }
+
+    let terms = query_terms(query);
+    let files = crate::config::list_search_files(dir)?;
+
+    // Phase 1: read + pre-filter + lowercase
+    let mut corpus: Vec<PrepSection> = Vec::new();
+    for path in &files {
+        let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        for section in parse_sections(&content) {
+            if !passes_filter(&section, filter) { continue; }
+            let text_lower = section.iter()
+                .map(|l| l.to_lowercase()).collect::<Vec<_>>().join("\n");
+            corpus.push(PrepSection {
+                name: name.clone(),
+                lines: section.iter().map(|s| s.to_string()).collect(),
+                text_lower,
+            });
+        }
+    }
+
+    // Phase 2: BM25 corpus stats
+    let n = corpus.len() as f64;
+    let total_words: usize = corpus.iter()
+        .map(|s| s.text_lower.split_whitespace().count()).sum();
+    let avgdl = if corpus.is_empty() { 1.0 } else { total_words as f64 / n };
+    let dfs: Vec<usize> = terms.iter()
+        .map(|t| corpus.iter().filter(|s| s.text_lower.contains(t.as_str())).count())
+        .collect();
+
+    // Phase 3: match + score
+    let mut mode = filter.mode;
+    let mut results: Vec<ScoredResult> = Vec::new();
+    for ps in &corpus {
+        if matches_text(&ps.text_lower, &terms, mode) {
+            let score = bm25_score(&ps.text_lower, &terms, n, avgdl, &dfs);
+            results.push(ScoredResult {
+                name: ps.name.clone(), section: ps.lines.clone(), score,
+            });
+        }
+    }
+
+    // AND→OR fallback
+    let mut fallback = false;
+    if results.is_empty() && mode == SearchMode::And && terms.len() >= 2 {
+        mode = SearchMode::Or;
+        for ps in &corpus {
+            if matches_text(&ps.text_lower, &terms, mode) {
+                let score = bm25_score(&ps.text_lower, &terms, n, avgdl, &dfs);
+                results.push(ScoredResult {
+                    name: ps.name.clone(), section: ps.lines.clone(), score,
+                });
+            }
+        }
+        fallback = !results.is_empty();
+    }
+
+    if !terms.is_empty() {
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    let total = results.len();
+    let show = limit.map(|l| total.min(l)).unwrap_or(total);
+    let mut out = String::new();
+    if fallback {
+        let _ = writeln!(out, "(no exact match — showing OR results)");
+    }
+
+    // Medium format: [topic] timestamp header + first 2 content lines
+    for r in results.iter().take(show) {
+        let header = r.section.first().map(|s| s.as_str()).unwrap_or("??");
+        let _ = writeln!(out, "  [{}] {}", r.name, header.trim_start_matches("## "));
+        let mut content_lines = 0;
+        for line in r.section.iter().skip(1) {
+            if line.starts_with("[tags:") || line.trim().is_empty() { continue; }
+            let short = truncate(line.trim(), 100);
+            let _ = writeln!(out, "    {short}");
+            content_lines += 1;
+            if content_lines >= 2 { break; }
+        }
+    }
+
+    if total == 0 {
+        out.push_str(&no_match_message(query, filter, dir));
+    } else if show < total {
+        let _ = writeln!(out, "{total} match(es), showing {show}");
+    } else {
+        let _ = writeln!(out, "{total} match(es)");
+    }
+    Ok(out)
+}
+
 pub fn run_topics(dir: &Path, query: &str, filter: &Filter) -> Result<String, String> {
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
