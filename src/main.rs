@@ -8,6 +8,7 @@ mod export;
 mod index;
 mod install;
 mod json;
+mod lock;
 mod mcp;
 mod migrate;
 mod prune;
@@ -83,9 +84,11 @@ fn main() {
             let after = parse_flag_str(cmd, "--after").and_then(|s| time::parse_date_days(&s));
             let before = parse_flag_str(cmd, "--before").and_then(|s| time::parse_date_days(&s));
             let tag = parse_flag_str(cmd, "--tag");
-            let filter = search::Filter { after, before, tag };
+            let or_mode = cmd.iter().any(|a| a == "--or");
+            let mode = if or_mode { search::SearchMode::Or } else { search::SearchMode::And };
+            let filter = search::Filter { after, before, tag, mode };
             let skip = ["--brief", "-b", "--count", "-c", "--topics", "-t",
-                        "--limit", "--after", "--before", "--tag"];
+                        "--limit", "--after", "--before", "--tag", "--or"];
             let query_parts: Vec<&str> = cmd[1..].iter()
                 .filter(|a| !skip.contains(&a.as_str()))
                 .filter(|a| {

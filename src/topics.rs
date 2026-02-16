@@ -4,6 +4,14 @@ use std::fs;
 use std::path::Path;
 
 pub fn list(dir: &Path) -> Result<String, String> {
+    list_inner(dir, false)
+}
+
+pub fn list_compact(dir: &Path) -> Result<String, String> {
+    list_inner(dir, true)
+}
+
+fn list_inner(dir: &Path, compact: bool) -> Result<String, String> {
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
     }
@@ -20,9 +28,13 @@ pub fn list(dir: &Path) -> Result<String, String> {
         let name = path.file_stem().unwrap().to_string_lossy();
         let entries = content.lines().filter(|l| l.starts_with("## ")).count();
         let tags = collect_tags(&content);
-        let tag_str = if tags.is_empty() { String::new() } else { format!("[tags: {}]", tags.join(", ")) };
-        let preview = last_entry_preview(&content);
-        let _ = writeln!(out, "  {name:<24} {entries:>3} entries  | {tag_str}{preview}");
+        let tag_str = if tags.is_empty() { String::new() } else { format!(" [tags: {}]", tags.join(", ")) };
+        if compact {
+            let _ = writeln!(out, "  {name:<24} {entries:>3} entries{tag_str}");
+        } else {
+            let preview = last_entry_preview(&content);
+            let _ = writeln!(out, "  {name:<24} {entries:>3} entries  |{tag_str} {preview}");
+        }
     }
     Ok(out)
 }

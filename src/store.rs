@@ -9,17 +9,24 @@ pub fn run(dir: &Path, topic: &str, text: &str) -> Result<String, String> {
 
 pub fn run_with_tags(dir: &Path, topic: &str, text: &str, tags: Option<&str>) -> Result<String, String> {
     crate::config::ensure_dir(dir)?;
+    let _lock = crate::lock::FileLock::acquire(dir)?;
     let text = read_text(text)?;
     let filename = crate::config::sanitize_topic(topic);
     let filepath = dir.join(format!("{filename}.md"));
 
-    // Check for duplicates — warn but still store
-    let dupe_warn = check_dupe(&filepath, &text);
+    // Check for duplicates — block store if high overlap
+    if let Some(existing) = check_dupe(&filepath, &text) {
+        return Err(format!("blocked: similar entry already exists in {filename}.md\n  existing: {existing}\nUse update_entry or append_entry to modify it."));
+    }
     // Suggest existing topics if this is a new topic
     let topic_hint = if !filepath.exists() { suggest_topic(dir, &filename) } else { None };
 
     let timestamp = LocalTime::now();
     let is_new = !filepath.exists();
+
+    // Normalize tags: lowercase, trim, dedupe
+    let cleaned_tags = tags.map(|t| normalize_tags(t));
+    let tag_warn = tags.and_then(|t| check_similar_tags(dir, t));
 
     let mut file = OpenOptions::new()
         .create(true)
@@ -31,21 +38,33 @@ pub fn run_with_tags(dir: &Path, topic: &str, text: &str, tags: Option<&str>) ->
         writeln!(file, "# {topic}\n").map_err(|e| e.to_string())?;
     }
     writeln!(file, "## {timestamp}").map_err(|e| e.to_string())?;
-    if let Some(tags) = tags {
-        let cleaned: Vec<&str> = tags.split(',').map(|t| t.trim()).filter(|t| !t.is_empty()).collect();
-        if !cleaned.is_empty() {
-            writeln!(file, "[tags: {}]", cleaned.join(", ")).map_err(|e| e.to_string())?;
+    if let Some(ref tags) = cleaned_tags {
+        if !tags.is_empty() {
+            writeln!(file, "[tags: {tags}]").map_err(|e| e.to_string())?;
         }
     }
     writeln!(file, "{text}\n").map_err(|e| e.to_string())?;
 
     let count = count_entries(&filepath);
-    let mut msg = format!("stored in {filename}.md ({count} entries)");
-    if let Some(warn) = dupe_warn {
-        msg.push_str(&format!("\n  warning: {warn}"));
-    }
+
+    // Echo back what was stored
+    let preview = if text.len() > 120 {
+        let mut end = 120;
+        while end > 0 && !text.is_char_boundary(end) { end -= 1; }
+        format!("{}...", &text[..end])
+    } else {
+        text.clone()
+    };
+    let tag_echo = cleaned_tags.as_deref().filter(|t| !t.is_empty())
+        .map(|t| format!(" [tags: {t}]"))
+        .unwrap_or_default();
+
+    let mut msg = format!("stored in {filename}.md ({count} entries)\n  @ {timestamp}{tag_echo}\n  > {preview}");
     if let Some(hint) = topic_hint {
         msg.push_str(&format!("\n  note: {hint}"));
+    }
+    if let Some(tw) = tag_warn {
+        msg.push_str(&format!("\n  tag note: {tw}"));
     }
     // Suggest tags from existing vocabulary if none provided
     if tags.is_none() {
@@ -58,6 +77,7 @@ pub fn run_with_tags(dir: &Path, topic: &str, text: &str, tags: Option<&str>) ->
 
 /// Append text to the LAST entry in a topic (no new timestamp)
 pub fn append(dir: &Path, topic: &str, text: &str) -> Result<String, String> {
+    let _lock = crate::lock::FileLock::acquire(dir)?;
     let text = read_text(text)?;
     let filename = crate::config::sanitize_topic(topic);
     let filepath = dir.join(format!("{filename}.md"));
@@ -94,24 +114,83 @@ fn read_text(text: &str) -> Result<String, String> {
     }
 }
 
-/// Check if similar content already exists in the topic file
+/// Normalize tags: lowercase, trim, dedupe, sort.
+fn normalize_tags(raw: &str) -> String {
+    let mut tags: Vec<String> = raw.split(',')
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    tags.sort();
+    tags.dedup();
+    tags.join(", ")
+}
+
+/// Check if provided tags are close to existing ones (catch "bugs" vs "bug").
+fn check_similar_tags(dir: &Path, raw: &str) -> Option<String> {
+    let existing = collect_tag_vocab(dir)?;
+    let new_tags: Vec<String> = raw.split(',')
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    let mut warnings = Vec::new();
+    for tag in &new_tags {
+        if existing.contains_key(tag) { continue; }
+        // Check for near-matches: one is prefix of other, or differ by trailing 's'
+        for (existing_tag, count) in &existing {
+            let similar = tag.starts_with(existing_tag.as_str())
+                || existing_tag.starts_with(tag.as_str())
+                || (tag.ends_with('s') && &tag[..tag.len()-1] == existing_tag.as_str())
+                || (existing_tag.ends_with('s') && &existing_tag[..existing_tag.len()-1] == tag.as_str());
+            if similar {
+                warnings.push(format!("'{tag}' — did you mean '{existing_tag}' ({count} uses)?"));
+                break;
+            }
+        }
+    }
+    if warnings.is_empty() { None } else { Some(warnings.join("; ")) }
+}
+
+/// Collect all tags with their usage counts.
+fn collect_tag_vocab(dir: &Path) -> Option<std::collections::BTreeMap<String, usize>> {
+    let files = crate::config::list_topic_files(dir).ok()?;
+    let mut tags = std::collections::BTreeMap::new();
+    for path in &files {
+        let content = fs::read_to_string(path).ok()?;
+        for line in content.lines() {
+            if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
+                for tag in inner.split(',') {
+                    let t = tag.trim().to_lowercase();
+                    if !t.is_empty() { *tags.entry(t).or_insert(0) += 1; }
+                }
+            }
+        }
+    }
+    Some(tags)
+}
+
+/// Check if similar content already exists. Returns existing entry text if >70% word overlap.
 fn check_dupe(filepath: &Path, new_text: &str) -> Option<String> {
     let content = fs::read_to_string(filepath).ok()?;
     let new_lower = new_text.to_lowercase();
-    // Extract significant words (4+ chars) from new text
     let words: Vec<&str> = new_lower.split_whitespace()
         .filter(|w| w.len() >= 4)
         .collect();
     if words.len() < 3 { return None; }
 
-    // Check each existing entry for word overlap
     let sections = crate::delete::split_sections(&content);
-    for (_, body) in &sections {
+    for (header, body) in &sections {
         let body_lower = body.to_lowercase();
         let matches = words.iter().filter(|w| body_lower.contains(**w)).count();
         let ratio = matches as f64 / words.len() as f64;
-        if ratio > 0.6 {
-            return Some("similar content may already exist in this topic".into());
+        if ratio > 0.7 {
+            let preview = body.trim().lines().next().unwrap_or("").trim();
+            let short = if preview.len() > 100 {
+                let mut end = 100;
+                while end > 0 && !preview.is_char_boundary(end) { end -= 1; }
+                format!("{}...", &preview[..end])
+            } else { preview.to_string() };
+            return Some(format!("[{header}] {short}"));
         }
     }
     None
@@ -137,19 +216,7 @@ fn suggest_topic(dir: &Path, new_name: &str) -> Option<String> {
 
 /// Suggest tags from existing vocabulary based on text content.
 fn suggest_tags(dir: &Path, text: &str) -> Option<String> {
-    let files = crate::config::list_topic_files(dir).ok()?;
-    let mut all_tags: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for path in &files {
-        let content = fs::read_to_string(path).ok()?;
-        for line in content.lines() {
-            if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
-                for tag in inner.split(',') {
-                    let t = tag.trim().to_lowercase();
-                    if !t.is_empty() { *all_tags.entry(t).or_insert(0) += 1; }
-                }
-            }
-        }
-    }
+    let all_tags = collect_tag_vocab(dir)?;
     if all_tags.is_empty() { return None; }
 
     let text_lower = text.to_lowercase();

@@ -4,6 +4,7 @@ use std::path::Path;
 
 /// Find duplicate/similar entries within a topic and optionally merge them.
 pub fn run(dir: &Path, topic: &str, apply: bool) -> Result<String, String> {
+    let _lock = crate::lock::FileLock::acquire(dir)?;
     let filename = crate::config::sanitize_topic(topic);
     let filepath = dir.join(format!("{filename}.md"));
     if !filepath.exists() {

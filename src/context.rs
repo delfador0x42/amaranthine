@@ -17,7 +17,11 @@ fn run_inner(dir: &Path, query: Option<&str>, plain: bool, brief: bool) -> Resul
     let mut out = String::new();
 
     section(&mut out, "Topics", plain);
-    out.push_str(&crate::topics::list(dir)?);
+    if brief {
+        out.push_str(&crate::topics::list_compact(dir)?);
+    } else {
+        out.push_str(&crate::topics::list(dir)?);
+    }
 
     if !brief {
         section(&mut out, "Recent (7 days)", plain);

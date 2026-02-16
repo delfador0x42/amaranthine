@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 pub fn run(dir: &Path, topic: &str, last: bool, all: bool, match_str: Option<&str>) -> Result<String, String> {
+    let _lock = crate::lock::FileLock::acquire(dir)?;
     let filename = crate::config::sanitize_topic(topic);
     let filepath = dir.join(format!("{filename}.md"));
 
@@ -32,6 +33,31 @@ pub fn run(dir: &Path, topic: &str, last: bool, all: bool, match_str: Option<&st
         }
         None => Err("no entries to remove".into()),
     }
+}
+
+/// Delete entry by 0-based index (from list_entries).
+pub fn run_by_index(dir: &Path, topic: &str, idx: usize) -> Result<String, String> {
+    let _lock = crate::lock::FileLock::acquire(dir)?;
+    let filename = crate::config::sanitize_topic(topic);
+    let filepath = dir.join(format!("{filename}.md"));
+
+    if !filepath.exists() {
+        return Err(format!("{filename}.md not found"));
+    }
+
+    let content = fs::read_to_string(&filepath).map_err(|e| e.to_string())?;
+    let sections = split_sections(&content);
+
+    if idx >= sections.len() {
+        return Err(format!("index {idx} out of range (topic has {} entries, 0-{})",
+            sections.len(), sections.len().saturating_sub(1)));
+    }
+
+    let result = rebuild_file(&content, &sections, Some(idx), None);
+    fs::write(&filepath, &result).map_err(|e| e.to_string())?;
+
+    let remaining = result.matches("\n## ").count();
+    Ok(format!("removed entry [{idx}] from {filename}.md ({remaining} remaining)"))
 }
 
 fn delete_matching(filepath: &Path, filename: &str, needle: &str) -> Result<String, String> {
