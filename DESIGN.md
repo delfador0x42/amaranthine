@@ -20,7 +20,7 @@ one command to store, one to search, one to orient at session start.
 `recent` → filter entries by date header within last N days
 `prune` → flag topic files with no updates in N days
 `serve` → MCP server over stdio (JSON-RPC, subprocess dispatch)
-`install` → self-install to ~/.claude/settings.json + CLAUDE.md
+`install` → self-install to ~/.claude.json + CLAUDE.md
 
 ## Decisions Made
 - Plain markdown: human-readable, git-trackable, grep-able
@@ -38,7 +38,7 @@ one command to store, one to search, one to orient at session start.
 ## Key Files
 - `src/main.rs` — CLI entry, manual arg parsing
 - `src/json.rs` — recursive descent JSON parser + pretty printer
-- `src/mcp.rs` — MCP server: stdio loop, 8 tools, subprocess dispatch
+- `src/mcp.rs` — MCP server: stdio loop, 9 tools, subprocess dispatch
 - `src/install.rs` — self-install to ~/.claude.json + CLAUDE.md
 - `src/time.rs` — libc FFI (localtime_r), Hinnant date algorithm
 - `src/config.rs` — path resolution, sanitization, file listing

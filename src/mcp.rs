@@ -54,7 +54,7 @@ fn init_result() -> Value {
         ])),
         ("serverInfo".into(), Value::Obj(vec![
             ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("0.3.0".into())),
+            ("version".into(), Value::Str("0.4.0".into())),
         ])),
     ])
 }
@@ -125,10 +125,16 @@ fn tool_list() -> Value {
             &[("days", "string", "Number of days (default: 7)")]),
         tool("delete_entry", "Remove the most recent entry from a topic",
             &["topic"],
-            &[("topic", "string", "Topic name")]),
+            &[("topic", "string", "Topic name"),
+              ("match_str", "string", "Delete entry matching this substring instead of last")]),
         tool("delete_topic", "Delete an entire topic and all its entries",
             &["topic"],
             &[("topic", "string", "Topic name")]),
+        tool("update_entry", "Overwrite an existing entry's text (keeps timestamp)",
+            &["topic", "match_str", "text"],
+            &[("topic", "string", "Topic name"),
+              ("match_str", "string", "Substring to find the entry to update"),
+              ("text", "string", "Replacement text for the entry")]),
         tool("read_topic", "Read the full contents of a specific topic file",
             &["topic"],
             &[("topic", "string", "Topic name")]),
@@ -163,8 +169,23 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path, exe: &Path) -> Result<
             let d = arg_str(args, "days");
             if !d.is_empty() { cli.push(d); }
         }
-        "delete_entry" => cli.extend(["delete".into(), arg_str(args, "topic"), "--last".into()]),
+        "delete_entry" => {
+            let m = arg_str(args, "match_str");
+            cli.extend(["delete".into(), arg_str(args, "topic")]);
+            if m.is_empty() {
+                cli.push("--last".into());
+            } else {
+                cli.extend(["--match".into(), m]);
+            }
+        }
         "delete_topic" => cli.extend(["delete".into(), arg_str(args, "topic"), "--all".into()]),
+        "update_entry" => {
+            cli.extend([
+                "edit".into(), arg_str(args, "topic"),
+                "--match".into(), arg_str(args, "match_str"),
+                arg_str(args, "text"),
+            ]);
+        }
         "digest" => cli.push("digest".into()),
         _ => return Err(format!("unknown tool: {name}")),
     }

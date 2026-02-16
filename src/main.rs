@@ -2,6 +2,7 @@ mod config;
 mod context;
 mod delete;
 mod digest;
+mod edit;
 mod index;
 mod install;
 mod json;
@@ -64,9 +65,30 @@ fn main() {
         Some("delete") if cmd.len() >= 2 => {
             let last = cmd.iter().any(|a| a == "--last");
             let all = cmd.iter().any(|a| a == "--all");
-            delete::run(&dir, &cmd[1], last, all)
+            let match_str = parse_flag_str(cmd, "--match");
+            delete::run(&dir, &cmd[1], last, all, match_str.as_deref())
         }
-        Some("delete") => Err("usage: delete <topic> [--last|--all]".into()),
+        Some("delete") => Err("usage: delete <topic> [--last|--all|--match <str>]".into()),
+        Some("edit") if cmd.len() >= 4 => {
+            let match_str = parse_flag_str(cmd, "--match");
+            match match_str {
+                Some(needle) => {
+                    // Collect text after --match <val>
+                    let mi = cmd.iter().position(|a| a == "--match").unwrap();
+                    let text_parts: Vec<&str> = cmd.iter().enumerate()
+                        .filter(|(i, a)| *i != 0 && *i != 1 && *i != mi && *i != mi + 1 && !a.is_empty())
+                        .map(|(_, a)| a.as_str())
+                        .collect();
+                    if text_parts.is_empty() {
+                        Err("usage: edit <topic> --match <substring> <new text>".into())
+                    } else {
+                        edit::run(&dir, &cmd[1], &needle, &text_parts.join(" "))
+                    }
+                }
+                None => Err("usage: edit <topic> --match <substring> <new text>".into()),
+            }
+        }
+        Some("edit") => Err("usage: edit <topic> --match <substring> <new text>".into()),
         Some("index") => index::run(&dir),
         Some("recent") => {
             let days = cmd.get(1).and_then(|s| s.parse().ok()).unwrap_or(7u64);
@@ -103,6 +125,13 @@ fn parse_flag_value<T: std::str::FromStr>(args: &[String], flag: &str) -> Option
         .and_then(|s| s.parse().ok())
 }
 
+fn parse_flag_str(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
 fn print_help() {
     print!(concat!(
         "amaranthine — persistent knowledge base for AI dev\n\n",
@@ -111,7 +140,8 @@ fn print_help() {
         "  store <topic> <text|->       Store entry (- reads stdin)\n",
         "  search <query>               Search all memory files\n",
         "  context [query]              Session briefing (topics + recent + search)\n",
-        "  delete <topic> --last|--all  Remove entries\n",
+        "  delete <topic> --last|--all|--match <str>  Remove entries\n",
+        "  edit <topic> --match <str> <text>           Update matching entry\n",
         "  index                        Generate topic manifest\n",
         "  recent [days]                Entries from last N days (default: 7)\n",
         "  topics                       List topics with counts\n",
