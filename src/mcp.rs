@@ -125,7 +125,7 @@ fn init_result() -> Value {
         ])),
         ("serverInfo".into(), Value::Obj(vec![
             ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("1.3.0".into())),
+            ("version".into(), Value::Str("1.4.0".into())),
         ])),
     ])
 }
