@@ -24,13 +24,13 @@ Restart Claude Code. Your agent now has persistent memory.
 
 ## What the agent gets
 
-26 MCP tools, organized by function:
+31 MCP tools, organized by function:
 
 **Search** — find knowledge across all topics
 | Tool | What it does |
 |------|-------------|
-| `search` | Full-text search with BM25 ranking |
-| `search_medium` | Topic + timestamp + first 2 lines per hit |
+| `search` | Full-text BM25 search, topic filter, detail level (full/medium/brief) |
+| `search_medium` | Topic + timestamp + first 2 lines per hit (default) |
 | `search_brief` | Topic + first matching line per hit |
 | `search_topics` | Which topics matched + hit counts |
 | `search_count` | Just count matches (fastest) |
@@ -39,9 +39,9 @@ Restart Claude Code. Your agent now has persistent memory.
 | Tool | What it does |
 |------|-------------|
 | `store` | Save a timestamped entry under a topic |
-| `batch_store` | Store multiple entries in one call |
+| `batch_store` | Store multiple entries as native JSON array (terse default, intra-batch dedup) |
 | `append` | Add text to the last entry (no new timestamp) |
-| `append_entry` | Add text to a specific entry by match/index |
+| `append_entry` | Add text to a specific entry by match, index, or tag |
 | `update_entry` | Replace an entry's text (keeps timestamp) |
 | `delete_entry` | Remove an entry by match/index/last |
 | `delete_topic` | Delete an entire topic |
@@ -57,6 +57,13 @@ Restart Claude Code. Your agent now has persistent memory.
 | `stats` | Topic count, entry count, date range |
 | `list_tags` | All tags with usage counts |
 | `list_entries` | Entries in a topic with index numbers |
+| `get_entry` | Fetch a single entry by topic + index |
+
+**Edit** — reorganize knowledge
+| Tool | What it does |
+|------|-------------|
+| `rename_topic` | Rename a topic file (preserves entries) |
+| `tag_entry` | Add or remove tags on an existing entry |
 
 **Maintenance** — keep knowledge clean
 | Tool | What it does |
@@ -66,6 +73,7 @@ Restart Claude Code. Your agent now has persistent memory.
 | `xref` | Find cross-references between topics |
 | `export` / `import` | JSON backup and restore |
 | `migrate` | Fix entries without timestamps |
+| `session` | Show what was stored this session |
 | `_reload` | Hot-reload binary after code changes |
 
 ## How it works
@@ -74,15 +82,16 @@ Knowledge is stored as timestamped markdown entries in topic files:
 
 ```
 ~/.amaranthine/
-  rust-ffi.md        # 7 entries about Rust FFI patterns
+  rust-ffi.md        # 12 entries about Rust FFI patterns
   build-gotchas.md   # things that bit me once
-  iris-project.md    # project structure decisions
+  iris-engine.md     # detection pipeline architecture
 ```
 
 Each file is human-readable markdown. No database, no cloud, no lock-in.
 
 Search uses BM25 ranking with CamelCase/snake_case splitting and AND-to-OR
-fallback. Duplicate detection warns but doesn't block. Tags are auto-normalized.
+fallback. Query is optional — browse by topic or tag without specifying one.
+Duplicate detection warns but doesn't block. Tags are auto-normalized.
 
 ## CLI usage
 
