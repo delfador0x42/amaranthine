@@ -57,7 +57,7 @@ fn update_claude_json(path: &Path, exe: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn update_claude_md(path: &Path, exe: &str) -> Result<(), String> {
+fn update_claude_md(path: &Path, _exe: &str) -> Result<(), String> {
     if !path.exists() {
         println!("CLAUDE.md: not found, skipping");
         return Ok(());
@@ -69,15 +69,22 @@ fn update_claude_md(path: &Path, exe: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    let section = format!(concat!(
+    let section = concat!(
         "\n## Memory \u{2014} amaranthine\n",
-        "amaranthine is available at {exe} and as MCP server.\n",
-        "Use `amaranthine --plain search <query>` to search knowledge.\n",
-        "Use `amaranthine --plain store <topic> <text>` to store knowledge.\n",
-        "Use `amaranthine --plain context` for session orientation.\n",
-    ), exe = exe);
+        "Cross-session knowledge store. Always use **MCP tools** (prefixed `amaranthine__`).\n\n",
+        "**MANDATORY \u{2014} every session, every task:**\n",
+        "1. `context(brief: \"true\")` at session start \u{2014} load all topic knowledge\n",
+        "2. `search(query)` BEFORE starting any feature/fix \u{2014} check for prior learnings\n",
+        "3. `store(topic, text)` DURING work \u{2014} atomic facts as you discover them\n\n",
+        "**Searching:** `search(query)` | `search_brief` (fast) | `search_count` (fastest)\n",
+        "**Writing:** `store(topic, text, tags?)` | `append(topic, text)` | `delete_entry`\n\n",
+        "**Discipline:**\n",
+        "- Store each non-obvious finding IMMEDIATELY \u{2014} don\u{2019}t batch them\n",
+        "- Small atomic entries > big summaries. Searchable > comprehensive.\n",
+        "- Delete wrong info immediately.\n",
+    );
 
     fs::write(path, format!("{content}{section}")).map_err(|e| e.to_string())?;
-    println!("CLAUDE.md: added amaranthine section");
+    println!("CLAUDE.md: added amaranthine workflow section");
     Ok(())
 }
