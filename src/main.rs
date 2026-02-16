@@ -1,6 +1,7 @@
 mod config;
 mod context;
 mod delete;
+mod digest;
 mod index;
 mod install;
 mod json;
@@ -76,6 +77,7 @@ fn main() {
             let stale = parse_flag_value(cmd, "--stale").unwrap_or(30u64);
             prune::run(&dir, stale, plain)
         }
+        Some("digest") => digest::run(&dir),
         Some("serve") => {
             let d = if cmd.len() >= 3 && (cmd[1] == "--dir" || cmd[1] == "-d") {
                 std::path::PathBuf::from(&cmd[2])
@@ -114,6 +116,7 @@ fn print_help() {
         "  recent [days]                Entries from last N days (default: 7)\n",
         "  topics                       List topics with counts\n",
         "  prune [--stale N]            Flag stale topics (default: 30 days)\n",
+        "  digest                       Compact summary for MEMORY.md\n",
         "  serve                        MCP server over stdio\n",
         "  install                      Add to Claude Code settings\n",
         "  init [path]                  Initialize memory directory\n\n",

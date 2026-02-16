@@ -132,6 +132,8 @@ fn tool_list() -> Value {
         tool("read_topic", "Read the full contents of a specific topic file",
             &["topic"],
             &[("topic", "string", "Topic name")]),
+        tool("digest", "Compact summary of all topics (one bullet per entry)",
+            &[], &[]),
     ])
 }
 
@@ -163,6 +165,7 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path, exe: &Path) -> Result<
         }
         "delete_entry" => cli.extend(["delete".into(), arg_str(args, "topic"), "--last".into()]),
         "delete_topic" => cli.extend(["delete".into(), arg_str(args, "topic"), "--all".into()]),
+        "digest" => cli.push("digest".into()),
         _ => return Err(format!("unknown tool: {name}")),
     }
 

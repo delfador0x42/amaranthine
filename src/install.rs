@@ -1,25 +1,32 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub fn run(dir: &Path) -> Result<(), String> {
+pub fn run(_dir: &Path) -> Result<(), String> {
     let home = std::env::var("HOME").map_err(|_| "HOME not set")?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe_s = exe.to_string_lossy();
-    let dir_s = dir.to_string_lossy();
+
+    // Ensure global fallback dir exists
+    let global_dir = PathBuf::from(&home).join(".amaranthine");
+    if !global_dir.exists() {
+        fs::create_dir_all(&global_dir).map_err(|e| e.to_string())?;
+        println!("created ~/.amaranthine/ (global fallback)");
+    }
 
     let claude_dir = PathBuf::from(&home).join(".claude");
     if !claude_dir.exists() {
         fs::create_dir_all(&claude_dir).map_err(|e| e.to_string())?;
     }
 
-    update_settings(&claude_dir.join("settings.json"), &exe_s, &dir_s)?;
+    update_settings(&claude_dir.join("settings.json"), &exe_s)?;
     update_claude_md(&claude_dir.join("CLAUDE.md"), &exe_s)?;
 
     println!("\namaranthine installed. restart claude code to pick up MCP server.");
+    println!("all knowledge lives in ~/.amaranthine/");
     Ok(())
 }
 
-fn update_settings(path: &Path, exe: &str, dir: &str) -> Result<(), String> {
+fn update_settings(path: &Path, exe: &str) -> Result<(), String> {
     let content = if path.exists() {
         fs::read_to_string(path).map_err(|e| e.to_string())?
     } else {
@@ -41,11 +48,10 @@ fn update_settings(path: &Path, exe: &str, dir: &str) -> Result<(), String> {
     if settings.get("mcpServers").is_none() {
         settings.set("mcpServers", Value::Obj(Vec::new()));
     }
+    // No --dir: walk-up resolution finds project .amaranthine/ or falls back to ~/
     let server_config = Value::Obj(vec![
         ("command".into(), Value::Str(exe.into())),
         ("args".into(), Value::Arr(vec![
-            Value::Str("--dir".into()),
-            Value::Str(dir.into()),
             Value::Str("serve".into()),
         ])),
     ]);

@@ -5,19 +5,6 @@ pub fn resolve_dir(explicit: Option<String>) -> PathBuf {
     if let Some(d) = explicit {
         return PathBuf::from(d);
     }
-    if let Ok(cwd) = env::current_dir() {
-        let mut dir = cwd.as_path();
-        loop {
-            let candidate = dir.join(".amaranthine");
-            if candidate.is_dir() {
-                return candidate;
-            }
-            match dir.parent() {
-                Some(p) => dir = p,
-                None => break,
-            }
-        }
-    }
     let home = env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     PathBuf::from(home).join(".amaranthine")
 }
@@ -25,9 +12,7 @@ pub fn resolve_dir(explicit: Option<String>) -> PathBuf {
 pub fn init(path: Option<&str>) -> Result<(), String> {
     let dir = match path {
         Some(p) => PathBuf::from(p),
-        None => env::current_dir()
-            .map_err(|e| e.to_string())?
-            .join(".amaranthine"),
+        None => resolve_dir(None),
     };
     fs::create_dir_all(&dir)
         .map_err(|e| format!("can't create {}: {e}", dir.display()))?;

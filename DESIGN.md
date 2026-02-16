@@ -19,6 +19,8 @@ one command to store, one to search, one to orient at session start.
 `index` → scan topic files, generate `INDEX.md` manifest
 `recent` → filter entries by date header within last N days
 `prune` → flag topic files with no updates in N days
+`serve` → MCP server over stdio (JSON-RPC, subprocess dispatch)
+`install` → self-install to ~/.claude/settings.json + CLAUDE.md
 
 ## Decisions Made
 - Plain markdown: human-readable, git-trackable, grep-able
@@ -26,11 +28,18 @@ one command to store, one to search, one to orient at session start.
 - Case-insensitive by default: matches how you think, not how you typed
 - Zero dependencies: hand-rolled arg parsing, libc FFI, substring search
 - `--plain` flag: strips ANSI for programmatic use (AI tool calls)
-- 377KB binary, 2s compile: every line is ours
+- 443KB binary, 3s compile: every line is ours
 - Timestamps in `## YYYY-MM-DD HH:MM` format: parseable, sortable
+- MCP server calls own CLI as subprocesses: zero code duplication
+- Hand-rolled JSON parser: recursive descent, ~200 lines, handles full spec
+- `install` modifies settings.json directly via own JSON parser (dogfooding)
+- Single knowledge dir: ~/.amaranthine/ always, --dir for explicit override only
 
 ## Key Files
-- `src/main.rs` — CLI entry, manual arg parsing (113 lines)
+- `src/main.rs` — CLI entry, manual arg parsing
+- `src/json.rs` — recursive descent JSON parser + pretty printer
+- `src/mcp.rs` — MCP server: stdio loop, 8 tools, subprocess dispatch
+- `src/install.rs` — self-install to settings.json + CLAUDE.md
 - `src/time.rs` — libc FFI (localtime_r), Hinnant date algorithm
 - `src/config.rs` — path resolution, sanitization, file listing
 - `src/context.rs` — session orientation (topics + recent + search)
