@@ -1,4 +1,4 @@
-use chrono::{Days, Local, NaiveDate};
+use crate::time;
 use std::fs;
 use std::path::Path;
 
@@ -23,16 +23,13 @@ pub fn list(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn recent(dir: &Path, days: u64) -> Result<(), String> {
+pub fn recent(dir: &Path, days: u64, plain: bool) -> Result<(), String> {
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
     }
 
-    let cutoff = Local::now()
-        .date_naive()
-        .checked_sub_days(Days::new(days))
-        .unwrap();
-
+    let today = time::LocalTime::now().to_days();
+    let cutoff = today - days as i64;
     let files = crate::config::list_topic_files(dir)?;
     let mut found = 0;
 
@@ -43,13 +40,16 @@ pub fn recent(dir: &Path, days: u64) -> Result<(), String> {
 
         for line in content.lines() {
             if line.starts_with("## ") {
-                let date_part = line.trim_start_matches("## ");
-                let date_str = date_part.split_whitespace().next().unwrap_or("");
-                in_recent = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+                let header = line.trim_start_matches("## ");
+                in_recent = time::parse_date_days(header)
                     .map(|d| d >= cutoff)
                     .unwrap_or(false);
                 if in_recent {
-                    println!("\x1b[1;36m[{name}]\x1b[0m {line}");
+                    if plain {
+                        println!("[{name}] {line}");
+                    } else {
+                        println!("\x1b[1;36m[{name}]\x1b[0m {line}");
+                    }
                     found += 1;
                 }
             } else if in_recent && !line.is_empty() {

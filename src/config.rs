@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
-/// Resolve memory directory: explicit > walk-up .amaranthine > ~/.amaranthine
 pub fn resolve_dir(explicit: Option<String>) -> PathBuf {
     if let Some(d) = explicit {
         return PathBuf::from(d);
@@ -23,7 +22,7 @@ pub fn resolve_dir(explicit: Option<String>) -> PathBuf {
     PathBuf::from(home).join(".amaranthine")
 }
 
-pub fn init(path: Option<String>) -> Result<(), String> {
+pub fn init(path: Option<&str>) -> Result<(), String> {
     let dir = match path {
         Some(p) => PathBuf::from(p),
         None => env::current_dir()
@@ -44,12 +43,20 @@ pub fn ensure_dir(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Topic files only (excludes INDEX.md and MEMORY.md)
+pub fn sanitize_topic(topic: &str) -> String {
+    topic
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+        .collect()
+}
+
+/// Topic files only (excludes INDEX.md and MEMORY.md).
 pub fn list_topic_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     list_md_files(dir, &["INDEX.md", "MEMORY.md"])
 }
 
-/// All searchable files (excludes INDEX.md only)
+/// All searchable .md files (excludes INDEX.md only).
 pub fn list_search_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     list_md_files(dir, &["INDEX.md"])
 }

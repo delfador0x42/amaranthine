@@ -1,4 +1,4 @@
-use chrono::Local;
+use crate::time::LocalTime;
 use std::fs;
 use std::path::Path;
 
@@ -25,7 +25,7 @@ pub fn run(dir: &Path) -> Result<(), String> {
     }
 
     let total: usize = topics.iter().map(|t| t.1).sum();
-    let now = Local::now().format("%Y-%m-%d %H:%M");
+    let now = LocalTime::now();
 
     let mut out = format!("# Amaranthine Index\nGenerated: {now}\n\n");
     out += &format!("## Topics ({} files, {total} entries)\n", topics.len());

@@ -1,17 +1,14 @@
-use chrono::{Days, Local, NaiveDate};
+use crate::time;
 use std::fs;
 use std::path::Path;
 
-pub fn run(dir: &Path, stale_days: u64) -> Result<(), String> {
+pub fn run(dir: &Path, stale_days: u64, plain: bool) -> Result<(), String> {
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
     }
 
-    let cutoff = Local::now()
-        .date_naive()
-        .checked_sub_days(Days::new(stale_days))
-        .unwrap();
-
+    let today = time::LocalTime::now().to_days();
+    let cutoff = today - stale_days as i64;
     let files = crate::config::list_topic_files(dir)?;
     let mut stale = 0;
 
@@ -22,19 +19,24 @@ pub fn run(dir: &Path, stale_days: u64) -> Result<(), String> {
         let latest = content
             .lines()
             .filter(|l| l.starts_with("## "))
-            .filter_map(|l| {
-                let s = l.trim_start_matches("## ").split_whitespace().next()?;
-                NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
-            })
+            .filter_map(|l| time::parse_date_days(l.trim_start_matches("## ")))
             .max();
 
         match latest {
-            Some(date) if date < cutoff => {
-                println!("\x1b[1;33mstale:\x1b[0m {name} (last: {date})");
+            Some(d) if d < cutoff => {
+                if plain {
+                    println!("stale: {name} (last entry > {stale_days} days ago)");
+                } else {
+                    println!("\x1b[1;33mstale:\x1b[0m {name} (> {stale_days} days)");
+                }
                 stale += 1;
             }
             None => {
-                println!("\x1b[1;31mno dates:\x1b[0m {name}");
+                if plain {
+                    println!("no dates: {name}");
+                } else {
+                    println!("\x1b[1;31mno dates:\x1b[0m {name}");
+                }
                 stale += 1;
             }
             _ => {}
