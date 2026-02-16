@@ -62,9 +62,11 @@ fn main() {
         Some("search") if cmd.len() >= 2 => {
             let brief = cmd.iter().any(|a| a == "--brief" || a == "-b");
             let count_only = cmd.iter().any(|a| a == "--count" || a == "-c");
+            let topics_only = cmd.iter().any(|a| a == "--topics" || a == "-t");
             let limit: Option<usize> = parse_flag_value(cmd, "--limit");
             let query_parts: Vec<&str> = cmd[1..].iter()
-                .filter(|a| *a != "--brief" && *a != "-b" && *a != "--count" && *a != "-c" && *a != "--limit")
+                .filter(|a| *a != "--brief" && *a != "-b" && *a != "--count"
+                    && *a != "-c" && *a != "--topics" && *a != "-t" && *a != "--limit")
                 .filter(|a| {
                     // skip the value after --limit
                     let prev = cmd.iter().position(|x| x == *a);
@@ -74,13 +76,15 @@ fn main() {
             let q = query_parts.join(" ");
             if count_only {
                 search::count(&dir, &q)
+            } else if topics_only {
+                search::run_topics(&dir, &q)
             } else if brief {
                 search::run_brief(&dir, &q, limit)
             } else {
                 search::run(&dir, &q, plain, limit)
             }
         }
-        Some("search") => Err("usage: search <query> [--brief|--count] [--limit N]".into()),
+        Some("search") => Err("usage: search <query> [--brief|--count|--topics] [--limit N]".into()),
         Some("context") => {
             let brief = cmd.iter().any(|a| a == "--brief" || a == "-b");
             let query_parts: Vec<&str> = cmd[1..].iter()
@@ -169,7 +173,7 @@ fn print_help() {
         "COMMANDS:\n",
         "  store <topic> <text|->       Store entry (- reads stdin)\n",
         "  append <topic> <text|->      Add to last entry (no new timestamp)\n",
-        "  search <query> [--brief|--count] [--limit N]  Search\n",
+        "  search <query> [--brief|--count|--topics] [--limit N]  Search\n",
         "  context [query] [--brief]    Session briefing (--brief: topics only)\n",
         "  delete <topic> --last|--all|--match <str>  Remove entries\n",
         "  edit <topic> --match <str> <text>           Update matching entry\n",

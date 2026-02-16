@@ -95,7 +95,7 @@ fn init_result() -> Value {
         ])),
         ("serverInfo".into(), Value::Obj(vec![
             ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("0.6.0".into())),
+            ("version".into(), Value::Str("0.7.0".into())),
         ])),
     ])
 }
@@ -168,6 +168,9 @@ fn tool_list() -> Value {
         tool("search_count", "Count matching sections without returning content. Fast way to gauge query scope.",
             &["query"],
             &[("query", "string", "Search query")]),
+        tool("search_topics", "Show which topics matched and how many hits per topic. Best first step before deep search.",
+            &["query"],
+            &[("query", "string", "Search query")]),
         tool("context", "Session briefing: topics + recent entries (7 days) + optional search",
             &[],
             &[("query", "string", "Optional search query"),
@@ -229,6 +232,10 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
         "search_count" => {
             let query = arg_str(args, "query");
             crate::search::count(dir, &query)
+        }
+        "search_topics" => {
+            let query = arg_str(args, "query");
+            crate::search::run_topics(dir, &query)
         }
         "context" => {
             let q = arg_str(args, "query");

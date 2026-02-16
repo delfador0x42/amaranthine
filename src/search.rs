@@ -10,6 +10,43 @@ pub fn run_brief(dir: &Path, query: &str, limit: Option<usize>) -> Result<String
     search(dir, query, true, true, limit)
 }
 
+pub fn run_topics(dir: &Path, query: &str) -> Result<String, String> {
+    if !dir.exists() {
+        return Err(format!("{} not found", dir.display()));
+    }
+    let query_lower = query.to_lowercase();
+    let files = crate::config::list_search_files(dir)?;
+    let mut hits: Vec<(String, usize)> = Vec::new();
+    let mut total = 0;
+
+    for path in &files {
+        let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        let sections = parse_sections(&content);
+        let mut n = 0;
+        for section in &sections {
+            if section.iter().any(|l| l.to_lowercase().contains(&query_lower)) {
+                n += 1;
+            }
+        }
+        if n > 0 {
+            total += n;
+            hits.push((name, n));
+        }
+    }
+
+    let mut out = String::new();
+    if hits.is_empty() {
+        let _ = writeln!(out, "no matches for '{query}'");
+    } else {
+        for (topic, n) in &hits {
+            let _ = writeln!(out, "  {topic}: {n} hit{}", if *n == 1 { "" } else { "s" });
+        }
+        let _ = writeln!(out, "{total} match(es) across {} topic(s)", hits.len());
+    }
+    Ok(out)
+}
+
 pub fn count(dir: &Path, query: &str) -> Result<String, String> {
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
