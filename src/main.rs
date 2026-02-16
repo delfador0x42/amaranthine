@@ -1,17 +1,22 @@
+mod compact;
 mod config;
 mod context;
 mod delete;
 mod digest;
 mod edit;
+mod export;
 mod index;
 mod install;
 mod json;
 mod mcp;
+mod migrate;
 mod prune;
 mod search;
+mod stats;
 mod store;
 mod time;
 mod topics;
+mod xref;
 
 use std::env;
 
@@ -151,6 +156,32 @@ fn main() {
             prune::run(&dir, stale, plain)
         }
         Some("digest") => digest::run(&dir),
+        Some("stats") => stats::stats(&dir),
+        Some("tags") => stats::list_tags(&dir),
+        Some("entries") if cmd.len() >= 2 => {
+            let match_str = parse_flag_str(cmd, "--match");
+            stats::list_entries(&dir, &cmd[1], match_str.as_deref())
+        }
+        Some("entries") => Err("usage: entries <topic> [--match <str>]".into()),
+        Some("compact") if cmd.len() >= 2 => {
+            let apply = cmd.iter().any(|a| a == "--apply");
+            compact::run(&dir, &cmd[1], apply)
+        }
+        Some("compact") => compact::scan(&dir),
+        Some("export") => export::export(&dir),
+        Some("import") if cmd.len() >= 2 => {
+            match std::fs::read_to_string(&cmd[1]) {
+                Ok(json) => export::import(&dir, &json),
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        Some("import") => Err("usage: import <file>".into()),
+        Some("xref") if cmd.len() >= 2 => xref::refs_for(&dir, &cmd[1]),
+        Some("xref") => Err("usage: xref <topic>".into()),
+        Some("migrate") => {
+            let apply = cmd.iter().any(|a| a == "--apply");
+            migrate::run(&dir, apply)
+        }
         Some("serve") => {
             let d = if cmd.len() >= 3 && (cmd[1] == "--dir" || cmd[1] == "-d") {
                 std::path::PathBuf::from(&cmd[2])
@@ -205,6 +236,14 @@ fn print_help() {
         "  recent [days]                Entries from last N days (default: 7)\n",
         "  topics                       List topics with counts\n",
         "  prune [--stale N]            Flag stale topics (default: 30 days)\n",
+        "  stats                        Topic count, entry count, date range, tags\n",
+        "  tags                         List all tags with counts\n",
+        "  entries <topic> [--match X]  List entries with index numbers\n",
+        "  compact [topic] [--apply]    Find/merge duplicate entries\n",
+        "  export                       Export all topics as JSON\n",
+        "  import <file|->              Import topics from JSON\n",
+        "  xref <topic>                 Find cross-references in other topics\n",
+        "  migrate [--apply]            Find/fix entries without timestamps\n",
         "  digest                       Compact summary for MEMORY.md\n",
         "  serve                        MCP server over stdio\n",
         "  install                      Add to Claude Code settings\n",

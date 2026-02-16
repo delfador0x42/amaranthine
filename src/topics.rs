@@ -19,10 +19,26 @@ pub fn list(dir: &Path) -> Result<String, String> {
         let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
         let name = path.file_stem().unwrap().to_string_lossy();
         let entries = content.lines().filter(|l| l.starts_with("## ")).count();
+        let tags = collect_tags(&content);
+        let tag_str = if tags.is_empty() { String::new() } else { format!("[tags: {}]", tags.join(", ")) };
         let preview = last_entry_preview(&content);
-        let _ = writeln!(out, "  {name:<24} {entries:>3} entries  | {preview}");
+        let _ = writeln!(out, "  {name:<24} {entries:>3} entries  | {tag_str}{preview}");
     }
     Ok(out)
+}
+
+/// Collect unique tags from all [tags: ...] lines in a file.
+fn collect_tags(content: &str) -> Vec<String> {
+    let mut tags = std::collections::BTreeSet::new();
+    for line in content.lines() {
+        if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
+            for tag in inner.split(',') {
+                let t = tag.trim().to_lowercase();
+                if !t.is_empty() { tags.insert(t); }
+            }
+        }
+    }
+    tags.into_iter().collect()
 }
 
 fn last_entry_preview(content: &str) -> String {
@@ -31,7 +47,7 @@ fn last_entry_preview(content: &str) -> String {
     if let Some(idx) = last_header {
         for line in &lines[idx + 1..] {
             let trimmed = line.trim();
-            if !trimmed.is_empty() {
+            if !trimmed.is_empty() && !trimmed.starts_with("[tags:") {
                 let clean = trimmed.trim_start_matches("- ");
                 if clean.len() > 60 {
                     let mut end = 60;

@@ -95,7 +95,7 @@ fn init_result() -> Value {
         ])),
         ("serverInfo".into(), Value::Obj(vec![
             ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("0.8.0".into())),
+            ("version".into(), Value::Str("1.0.0".into())),
         ])),
     ])
 }
@@ -215,6 +215,32 @@ fn tool_list() -> Value {
             &[("topic", "string", "Topic name")]),
         tool("digest", "Compact summary of all topics (one bullet per entry)",
             &[], &[]),
+        tool("list_tags", "List all tags used across all topics with counts",
+            &[], &[]),
+        tool("stats", "Show stats: topic count, entry count, date range, tag count",
+            &[], &[]),
+        tool("list_entries", "List entries in a topic with index numbers. For bulk review before delete.",
+            &["topic"],
+            &[("topic", "string", "Topic name"),
+              ("match_str", "string", "Only show entries matching this substring")]),
+        tool("prune", "Flag stale topics (no entries in N days). For identifying outdated knowledge.",
+            &[],
+            &[("days", "string", "Stale threshold in days (default: 30)")]),
+        tool("compact", "Find and merge duplicate entries within a topic. Without topic, scans all topics.",
+            &[],
+            &[("topic", "string", "Topic to compact (omit to scan all)"),
+              ("apply", "string", "Set to 'true' to actually merge (default: dry run)")]),
+        tool("export", "Export all topics as structured JSON for backup or migration.",
+            &[], &[]),
+        tool("import", "Import topics from JSON (merges with existing data).",
+            &["json"],
+            &[("json", "string", "JSON string to import")]),
+        tool("xref", "Find cross-references: entries in other topics that mention this topic.",
+            &["topic"],
+            &[("topic", "string", "Topic to find references for")]),
+        tool("migrate", "Find and fix entries without proper timestamps.",
+            &[],
+            &[("apply", "string", "Set to 'true' to backfill timestamps (default: dry run)")]),
         tool("_reload", "Re-exec the server binary to pick up code changes. Sends tools/list_changed notification after reload.",
             &[], &[]),
     ])
@@ -312,6 +338,41 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
                 .map_err(|e| format!("{f}.md: {e}"))
         }
         "digest" => crate::digest::run(dir),
+        "list_tags" => crate::stats::list_tags(dir),
+        "stats" => crate::stats::stats(dir),
+        "list_entries" => {
+            let topic = arg_str(args, "topic");
+            let m = arg_str(args, "match_str");
+            let match_str = if m.is_empty() { None } else { Some(m.as_str()) };
+            crate::stats::list_entries(dir, &topic, match_str)
+        }
+        "prune" => {
+            let d = arg_str(args, "days");
+            let days = d.parse().unwrap_or(30u64);
+            crate::prune::run(dir, days, true)
+        }
+        "compact" => {
+            let topic = arg_str(args, "topic");
+            let apply = arg_str(args, "apply") == "true";
+            if topic.is_empty() {
+                crate::compact::scan(dir)
+            } else {
+                crate::compact::run(dir, &topic, apply)
+            }
+        }
+        "export" => crate::export::export(dir),
+        "import" => {
+            let json = arg_str(args, "json");
+            crate::export::import(dir, &json)
+        }
+        "xref" => {
+            let topic = arg_str(args, "topic");
+            crate::xref::refs_for(dir, &topic)
+        }
+        "migrate" => {
+            let apply = arg_str(args, "apply") == "true";
+            crate::migrate::run(dir, apply)
+        }
         _ => Err(format!("unknown tool: {name}")),
     }
 }

@@ -26,7 +26,7 @@ pub fn run_topics(dir: &Path, query: &str, filter: &Filter) -> Result<String, St
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
     }
-    let query_lower = query.to_lowercase();
+    let terms = query_terms(query);
     let files = crate::config::list_search_files(dir)?;
     let mut hits: Vec<(String, usize)> = Vec::new();
     let mut total = 0;
@@ -38,7 +38,7 @@ pub fn run_topics(dir: &Path, query: &str, filter: &Filter) -> Result<String, St
         let mut n = 0;
         for section in &sections {
             if !passes_filter(section, filter) { continue; }
-            if query.is_empty() || section.iter().any(|l| l.to_lowercase().contains(&query_lower)) {
+            if matches_terms(section, &terms) {
                 n += 1;
             }
         }
@@ -64,7 +64,7 @@ pub fn count(dir: &Path, query: &str, filter: &Filter) -> Result<String, String>
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
     }
-    let query_lower = query.to_lowercase();
+    let terms = query_terms(query);
     let files = crate::config::list_search_files(dir)?;
     let mut total = 0;
     let mut topics = 0;
@@ -75,7 +75,7 @@ pub fn count(dir: &Path, query: &str, filter: &Filter) -> Result<String, String>
         let mut file_hits = 0;
         for section in &sections {
             if !passes_filter(section, filter) { continue; }
-            if query.is_empty() || section.iter().any(|l| l.to_lowercase().contains(&query_lower)) {
+            if matches_terms(section, &terms) {
                 file_hits += 1;
                 total += 1;
             }
@@ -85,67 +85,104 @@ pub fn count(dir: &Path, query: &str, filter: &Filter) -> Result<String, String>
     Ok(format!("{total} matches across {topics} topics for '{query}'"))
 }
 
+/// Scored search result for ranking.
+struct ScoredResult {
+    name: String,
+    section: Vec<String>,  // owned lines
+    score: u32,
+}
+
+/// Score a section by relevance: header matches worth more, count occurrences.
+fn score_section(section: &[&str], terms: &[String]) -> u32 {
+    if terms.is_empty() { return 1; }
+    let mut score: u32 = 0;
+    for (i, line) in section.iter().enumerate() {
+        let lower = line.to_lowercase();
+        for term in terms {
+            if lower.contains(term.as_str()) {
+                // Header match (## line) = 3 points, body = 1 point
+                score += if i == 0 { 3 } else { 1 };
+            }
+        }
+    }
+    score
+}
+
 fn search(dir: &Path, query: &str, plain: bool, brief: bool, limit: Option<usize>, filter: &Filter) -> Result<String, String> {
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
     }
 
-    let query_lower = query.to_lowercase();
+    let terms = query_terms(query);
     let files = crate::config::list_search_files(dir)?;
-    let mut total = 0;
-    let mut out = String::new();
-    let mut limited = false;
+    let mut results: Vec<ScoredResult> = Vec::new();
 
-    'outer: for path in &files {
+    for path in &files {
         let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let name = path.file_stem().unwrap().to_string_lossy();
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
         let sections = parse_sections(&content);
-        let mut file_matches = 0;
 
         for section in &sections {
             if !passes_filter(section, filter) { continue; }
-            let text_match = query.is_empty()
-                || section.iter().any(|l| l.to_lowercase().contains(&query_lower));
-            if text_match {
-                if brief {
-                    if query.is_empty() {
-                        // No query — show first content line
-                        if let Some(hit) = section.iter().find(|l| !l.starts_with("## ") && !l.starts_with("[tags:") && !l.trim().is_empty()) {
-                            let short = truncate(hit.trim(), 80);
-                            let _ = writeln!(out, "  [{name}] {short}");
-                        }
-                    } else if let Some(hit) = section.iter().find(|l| l.to_lowercase().contains(&query_lower)) {
-                        let trimmed = hit.trim_start_matches("- ").trim();
-                        let short = truncate(trimmed, 80);
-                        let _ = writeln!(out, "  [{name}] {short}");
+            if matches_terms(section, &terms) {
+                let score = score_section(section, &terms);
+                results.push(ScoredResult {
+                    name: name.clone(),
+                    section: section.iter().map(|s| s.to_string()).collect(),
+                    score,
+                });
+            }
+        }
+    }
+
+    // Sort by score descending (relevance ranking)
+    if !terms.is_empty() {
+        results.sort_by(|a, b| b.score.cmp(&a.score));
+    }
+
+    let total = results.len();
+    let show = match limit {
+        Some(lim) => results.len().min(lim),
+        None => results.len(),
+    };
+
+    let mut out = String::new();
+    let mut last_file = String::new();
+
+    for result in results.iter().take(show) {
+        if brief {
+            let section_refs: Vec<&str> = result.section.iter().map(|s| s.as_str()).collect();
+            if terms.is_empty() {
+                if let Some(hit) = section_refs.iter().find(|l| !l.starts_with("## ") && !l.starts_with("[tags:") && !l.trim().is_empty()) {
+                    let short = truncate(hit.trim(), 80);
+                    let _ = writeln!(out, "  [{}] {short}", result.name);
+                }
+            } else if let Some(hit) = section_refs.iter().find(|l| terms.iter().any(|t| l.to_lowercase().contains(t.as_str()))) {
+                let trimmed = hit.trim_start_matches("- ").trim();
+                let short = truncate(trimmed, 80);
+                let _ = writeln!(out, "  [{}] {short}", result.name);
+            }
+        } else {
+            if result.name != last_file {
+                if plain {
+                    let _ = writeln!(out, "\n--- {}.md ---", result.name);
+                } else {
+                    let _ = writeln!(out, "\n\x1b[1;36m--- {}.md ---\x1b[0m", result.name);
+                }
+                last_file = result.name.clone();
+            }
+            for line in &result.section {
+                if !terms.is_empty() && terms.iter().any(|t| line.to_lowercase().contains(t.as_str())) {
+                    if plain {
+                        let _ = writeln!(out, "> {line}");
+                    } else {
+                        let _ = writeln!(out, "\x1b[1;33m{line}\x1b[0m");
                     }
                 } else {
-                    if file_matches == 0 {
-                        if plain {
-                            let _ = writeln!(out, "\n--- {name}.md ---");
-                        } else {
-                            let _ = writeln!(out, "\n\x1b[1;36m--- {name}.md ---\x1b[0m");
-                        }
-                    }
-                    for line in section {
-                        if !query.is_empty() && line.to_lowercase().contains(&query_lower) {
-                            if plain {
-                                let _ = writeln!(out, "> {line}");
-                            } else {
-                                let _ = writeln!(out, "\x1b[1;33m{line}\x1b[0m");
-                            }
-                        } else {
-                            let _ = writeln!(out, "{line}");
-                        }
-                    }
-                    let _ = writeln!(out);
-                }
-                file_matches += 1;
-                total += 1;
-                if let Some(lim) = limit {
-                    if total >= lim { limited = true; break 'outer; }
+                    let _ = writeln!(out, "{line}");
                 }
             }
+            let _ = writeln!(out);
         }
     }
 
@@ -155,8 +192,8 @@ fn search(dir: &Path, query: &str, plain: bool, brief: bool, limit: Option<usize
         } else {
             let _ = writeln!(out, "no matches for '{query}'");
         }
-    } else if limited {
-        let _ = writeln!(out, "(showing {total} of {total}+ matches, limit applied)");
+    } else if show < total {
+        let _ = writeln!(out, "(showing {show} of {total} matches, limit applied)");
     } else if brief {
         let _ = writeln!(out, "{total} match(es)");
     } else {
@@ -197,6 +234,18 @@ fn passes_filter(section: &[&str], filter: &Filter) -> bool {
         if !has_tag { return false; }
     }
     true
+}
+
+/// Split query into lowercase terms for AND matching.
+fn query_terms(query: &str) -> Vec<String> {
+    query.to_lowercase().split_whitespace().map(String::from).collect()
+}
+
+/// Check if ALL terms appear somewhere in the section (AND logic).
+fn matches_terms(section: &[&str], terms: &[String]) -> bool {
+    if terms.is_empty() { return true; }
+    let combined: String = section.iter().map(|l| l.to_lowercase()).collect::<Vec<_>>().join("\n");
+    terms.iter().all(|term| combined.contains(term.as_str()))
 }
 
 fn truncate(s: &str, max: usize) -> &str {

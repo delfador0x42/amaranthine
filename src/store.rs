@@ -15,6 +15,8 @@ pub fn run_with_tags(dir: &Path, topic: &str, text: &str, tags: Option<&str>) ->
 
     // Check for duplicates — warn but still store
     let dupe_warn = check_dupe(&filepath, &text);
+    // Suggest existing topics if this is a new topic
+    let topic_hint = if !filepath.exists() { suggest_topic(dir, &filename) } else { None };
 
     let timestamp = LocalTime::now();
     let is_new = !filepath.exists();
@@ -41,6 +43,15 @@ pub fn run_with_tags(dir: &Path, topic: &str, text: &str, tags: Option<&str>) ->
     let mut msg = format!("stored in {filename}.md ({count} entries)");
     if let Some(warn) = dupe_warn {
         msg.push_str(&format!("\n  warning: {warn}"));
+    }
+    if let Some(hint) = topic_hint {
+        msg.push_str(&format!("\n  note: {hint}"));
+    }
+    // Suggest tags from existing vocabulary if none provided
+    if tags.is_none() {
+        if let Some(suggestions) = suggest_tags(dir, &text) {
+            msg.push_str(&format!("\n  suggested tags: {suggestions}"));
+        }
     }
     Ok(msg)
 }
@@ -104,6 +115,60 @@ fn check_dupe(filepath: &Path, new_text: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// When creating a new topic, check for similar existing topic names.
+fn suggest_topic(dir: &Path, new_name: &str) -> Option<String> {
+    let files = crate::config::list_topic_files(dir).ok()?;
+    let parts: Vec<&str> = new_name.split('-').collect();
+    let mut similar: Vec<String> = Vec::new();
+
+    for path in &files {
+        let name = path.file_stem()?.to_string_lossy().to_string();
+        // Check if any part of the new topic name appears in existing topics
+        let shared = parts.iter().filter(|p| p.len() >= 3 && name.contains(**p)).count();
+        if shared > 0 && name != new_name {
+            similar.push(name);
+        }
+    }
+    if similar.is_empty() { return None; }
+    Some(format!("new topic created. similar existing topics: {}", similar.join(", ")))
+}
+
+/// Suggest tags from existing vocabulary based on text content.
+fn suggest_tags(dir: &Path, text: &str) -> Option<String> {
+    let files = crate::config::list_topic_files(dir).ok()?;
+    let mut all_tags: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for path in &files {
+        let content = fs::read_to_string(path).ok()?;
+        for line in content.lines() {
+            if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
+                for tag in inner.split(',') {
+                    let t = tag.trim().to_lowercase();
+                    if !t.is_empty() { *all_tags.entry(t).or_insert(0) += 1; }
+                }
+            }
+        }
+    }
+    if all_tags.is_empty() { return None; }
+
+    let text_lower = text.to_lowercase();
+    let text_words: Vec<&str> = text_lower.split_whitespace().collect();
+    let mut matched: Vec<(&str, usize)> = Vec::new();
+
+    for (tag, count) in &all_tags {
+        // Match if tag appears as a word or substring in text
+        if text_words.iter().any(|w| w.contains(tag.as_str())) || text_lower.contains(tag.as_str()) {
+            matched.push((tag.as_str(), *count));
+        }
+    }
+    if matched.is_empty() { return None; }
+
+    // Sort by frequency (most used first), take top 5
+    matched.sort_by(|a, b| b.1.cmp(&a.1));
+    matched.truncate(5);
+    let tags: Vec<&str> = matched.iter().map(|(t, _)| *t).collect();
+    Some(tags.join(", "))
 }
 
 fn count_entries(path: &Path) -> usize {
