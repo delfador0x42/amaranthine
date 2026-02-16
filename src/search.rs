@@ -3,6 +3,14 @@ use std::fs;
 use std::path::Path;
 
 pub fn run(dir: &Path, query: &str, plain: bool) -> Result<String, String> {
+    search(dir, query, plain, false)
+}
+
+pub fn run_brief(dir: &Path, query: &str) -> Result<String, String> {
+    search(dir, query, true, true)
+}
+
+fn search(dir: &Path, query: &str, plain: bool, brief: bool) -> Result<String, String> {
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
     }
@@ -14,32 +22,41 @@ pub fn run(dir: &Path, query: &str, plain: bool) -> Result<String, String> {
 
     for path in &files {
         let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let name = path.file_name().unwrap().to_string_lossy();
+        let name = path.file_stem().unwrap().to_string_lossy();
         let sections = parse_sections(&content);
-        let mut file_printed = false;
+        let mut file_matches = 0;
 
         for section in &sections {
             if section.iter().any(|l| l.to_lowercase().contains(&query_lower)) {
-                if !file_printed {
-                    if plain {
-                        let _ = writeln!(out, "\n--- {name} ---");
-                    } else {
-                        let _ = writeln!(out, "\n\x1b[1;36m--- {name} ---\x1b[0m");
+                if brief {
+                    // Just show topic + first matching line
+                    if let Some(hit) = section.iter().find(|l| l.to_lowercase().contains(&query_lower)) {
+                        let trimmed = hit.trim_start_matches("- ").trim();
+                        let short = truncate(trimmed, 80);
+                        let _ = writeln!(out, "  [{name}] {short}");
                     }
-                    file_printed = true;
-                }
-                for line in section {
-                    if line.to_lowercase().contains(&query_lower) {
+                } else {
+                    if file_matches == 0 {
                         if plain {
-                            let _ = writeln!(out, "> {line}");
+                            let _ = writeln!(out, "\n--- {name}.md ---");
                         } else {
-                            let _ = writeln!(out, "\x1b[1;33m{line}\x1b[0m");
+                            let _ = writeln!(out, "\n\x1b[1;36m--- {name}.md ---\x1b[0m");
                         }
-                    } else {
-                        let _ = writeln!(out, "{line}");
                     }
+                    for line in section {
+                        if line.to_lowercase().contains(&query_lower) {
+                            if plain {
+                                let _ = writeln!(out, "> {line}");
+                            } else {
+                                let _ = writeln!(out, "\x1b[1;33m{line}\x1b[0m");
+                            }
+                        } else {
+                            let _ = writeln!(out, "{line}");
+                        }
+                    }
+                    let _ = writeln!(out);
                 }
-                let _ = writeln!(out);
+                file_matches += 1;
                 total += 1;
             }
         }
@@ -47,10 +64,19 @@ pub fn run(dir: &Path, query: &str, plain: bool) -> Result<String, String> {
 
     if total == 0 {
         let _ = writeln!(out, "no matches for '{query}'");
+    } else if brief {
+        let _ = writeln!(out, "{total} match(es)");
     } else {
         let _ = writeln!(out, "{total} matching section(s)");
     }
     Ok(out)
+}
+
+fn truncate(s: &str, max: usize) -> &str {
+    if s.len() <= max { return s; }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+    &s[..end]
 }
 
 fn parse_sections(content: &str) -> Vec<Vec<&str>> {

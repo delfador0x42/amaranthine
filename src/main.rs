@@ -56,11 +56,32 @@ fn main() {
         Some("store") if cmd.len() >= 3 => store::run(&dir, &cmd[1], &cmd[2..].join(" ")),
         Some("store") if cmd.len() == 2 => store::run(&dir, &cmd[1], "-"),
         Some("store") => Err("usage: store <topic> <text|-> (- reads stdin)".into()),
-        Some("search") if cmd.len() >= 2 => search::run(&dir, &cmd[1..].join(" "), plain),
-        Some("search") => Err("usage: search <query>".into()),
+        Some("append") if cmd.len() >= 3 => store::append(&dir, &cmd[1], &cmd[2..].join(" ")),
+        Some("append") if cmd.len() == 2 => store::append(&dir, &cmd[1], "-"),
+        Some("append") => Err("usage: append <topic> <text|-> (adds to last entry)".into()),
+        Some("search") if cmd.len() >= 2 => {
+            let brief = cmd.iter().any(|a| a == "--brief" || a == "-b");
+            let query_parts: Vec<&str> = cmd[1..].iter()
+                .filter(|a| *a != "--brief" && *a != "-b")
+                .map(|s| s.as_str()).collect();
+            if brief {
+                search::run_brief(&dir, &query_parts.join(" "))
+            } else {
+                search::run(&dir, &query_parts.join(" "), plain)
+            }
+        }
+        Some("search") => Err("usage: search <query> [--brief]".into()),
         Some("context") => {
-            let q = if cmd.len() >= 2 { Some(cmd[1..].join(" ")) } else { None };
-            context::run(&dir, q.as_deref(), plain)
+            let brief = cmd.iter().any(|a| a == "--brief" || a == "-b");
+            let query_parts: Vec<&str> = cmd[1..].iter()
+                .filter(|a| *a != "--brief" && *a != "-b")
+                .map(|s| s.as_str()).collect();
+            let q = if query_parts.is_empty() { None } else { Some(query_parts.join(" ")) };
+            if brief {
+                context::run_brief(&dir, q.as_deref(), plain)
+            } else {
+                context::run(&dir, q.as_deref(), plain)
+            }
         }
         Some("delete") if cmd.len() >= 2 => {
             let last = cmd.iter().any(|a| a == "--last");
@@ -137,8 +158,9 @@ fn print_help() {
         "USAGE: amaranthine [OPTIONS] <COMMAND>\n\n",
         "COMMANDS:\n",
         "  store <topic> <text|->       Store entry (- reads stdin)\n",
-        "  search <query>               Search all memory files\n",
-        "  context [query]              Session briefing (topics + recent + search)\n",
+        "  append <topic> <text|->      Add to last entry (no new timestamp)\n",
+        "  search <query> [--brief]     Search (--brief: topic + first hit only)\n",
+        "  context [query] [--brief]    Session briefing (--brief: topics only)\n",
         "  delete <topic> --last|--all|--match <str>  Remove entries\n",
         "  edit <topic> --match <str> <text>           Update matching entry\n",
         "  index                        Generate topic manifest\n",

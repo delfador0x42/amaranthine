@@ -2,6 +2,14 @@ use std::fmt::Write;
 use std::path::Path;
 
 pub fn run(dir: &Path, query: Option<&str>, plain: bool) -> Result<String, String> {
+    run_inner(dir, query, plain, false)
+}
+
+pub fn run_brief(dir: &Path, query: Option<&str>, plain: bool) -> Result<String, String> {
+    run_inner(dir, query, plain, true)
+}
+
+fn run_inner(dir: &Path, query: Option<&str>, plain: bool, brief: bool) -> Result<String, String> {
     if !dir.exists() {
         return Err(format!("{} not found", dir.display()));
     }
@@ -11,12 +19,19 @@ pub fn run(dir: &Path, query: Option<&str>, plain: bool) -> Result<String, Strin
     section(&mut out, "Topics", plain);
     out.push_str(&crate::topics::list(dir)?);
 
-    section(&mut out, "Recent (7 days)", plain);
-    out.push_str(&crate::topics::recent(dir, 7, plain)?);
+    if !brief {
+        section(&mut out, "Recent (7 days)", plain);
+        out.push_str(&crate::topics::recent(dir, 7, plain)?);
+    }
 
     if let Some(q) = query {
-        section(&mut out, &format!("Search: {q}"), plain);
-        out.push_str(&crate::search::run(dir, q, plain)?);
+        if brief {
+            section(&mut out, &format!("Search: {q}"), plain);
+            out.push_str(&crate::search::run_brief(dir, q)?);
+        } else {
+            section(&mut out, &format!("Search: {q}"), plain);
+            out.push_str(&crate::search::run(dir, q, plain)?);
+        }
     }
 
     Ok(out)

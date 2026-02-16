@@ -52,7 +52,7 @@ fn init_result() -> Value {
         ])),
         ("serverInfo".into(), Value::Obj(vec![
             ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("0.4.0".into())),
+            ("version".into(), Value::Str("0.5.0".into())),
         ])),
     ])
 }
@@ -106,16 +106,24 @@ fn tool(name: &str, desc: &str, req: &[&str], props: &[(&str, &str, &str)]) -> V
 
 fn tool_list() -> Value {
     Value::Arr(vec![
-        tool("store", "Store a timestamped knowledge entry under a topic",
+        tool("store", "Store a timestamped knowledge entry under a topic. Warns on duplicate content.",
             &["topic", "text"],
             &[("topic", "string", "Topic name"),
               ("text", "string", "Entry content")]),
+        tool("append", "Add text to the last entry in a topic (no new timestamp). Use when adding related info to a recent entry.",
+            &["topic", "text"],
+            &[("topic", "string", "Topic name"),
+              ("text", "string", "Text to append")]),
         tool("search", "Search all knowledge files (case-insensitive, returns full sections)",
+            &["query"],
+            &[("query", "string", "Search query")]),
+        tool("search_brief", "Quick search: just topic names + first matching line per hit",
             &["query"],
             &[("query", "string", "Search query")]),
         tool("context", "Session briefing: topics + recent entries (7 days) + optional search",
             &[],
-            &[("query", "string", "Optional search query")]),
+            &[("query", "string", "Optional search query"),
+              ("brief", "string", "Set to 'true' for compact mode (topics only, no recent)")]),
         tool("topics", "List all topic files with entry and line counts",
             &[], &[]),
         tool("recent", "Show entries from last N days across all topics",
@@ -128,6 +136,11 @@ fn tool_list() -> Value {
         tool("delete_topic", "Delete an entire topic and all its entries",
             &["topic"],
             &[("topic", "string", "Topic name")]),
+        tool("append_entry", "Add text to an existing entry found by substring match (keeps timestamp, preserves body)",
+            &["topic", "match_str", "text"],
+            &[("topic", "string", "Topic name"),
+              ("match_str", "string", "Substring to find the entry to append to"),
+              ("text", "string", "Text to append to the entry")]),
         tool("update_entry", "Overwrite an existing entry's text (keeps timestamp)",
             &["topic", "match_str", "text"],
             &[("topic", "string", "Topic name"),
@@ -148,14 +161,28 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
             let text = arg_str(args, "text");
             crate::store::run(dir, &topic, &text)
         }
+        "append" => {
+            let topic = arg_str(args, "topic");
+            let text = arg_str(args, "text");
+            crate::store::append(dir, &topic, &text)
+        }
         "search" => {
             let query = arg_str(args, "query");
             crate::search::run(dir, &query, true)
         }
+        "search_brief" => {
+            let query = arg_str(args, "query");
+            crate::search::run_brief(dir, &query)
+        }
         "context" => {
             let q = arg_str(args, "query");
             let q = if q.is_empty() { None } else { Some(q.as_str()) };
-            crate::context::run(dir, q, true)
+            let brief = arg_str(args, "brief");
+            if brief == "true" {
+                crate::context::run_brief(dir, q, true)
+            } else {
+                crate::context::run(dir, q, true)
+            }
         }
         "topics" => crate::topics::list(dir),
         "recent" => {
@@ -172,6 +199,12 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
         "delete_topic" => {
             let topic = arg_str(args, "topic");
             crate::delete::run(dir, &topic, false, true, None)
+        }
+        "append_entry" => {
+            let topic = arg_str(args, "topic");
+            let needle = arg_str(args, "match_str");
+            let text = arg_str(args, "text");
+            crate::edit::append(dir, &topic, &needle, &text)
         }
         "update_entry" => {
             let topic = arg_str(args, "topic");
