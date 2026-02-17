@@ -1,24 +1,6 @@
-mod compact;
-mod config;
-mod context;
-mod delete;
-mod digest;
-mod edit;
-mod export;
-mod index;
-mod install;
-mod json;
-mod lock;
-mod mcp;
-mod migrate;
-mod prune;
-mod search;
-mod stats;
-mod store;
-mod time;
-mod topics;
-mod xref;
-
+use amaranthine::{config, search, store, context, delete, edit, index,
+    topics, prune, digest, stats, compact, export, xref, migrate, mcp,
+    install, time, json};
 use std::env;
 
 fn main() {
@@ -187,6 +169,20 @@ fn main() {
             let apply = cmd.iter().any(|a| a == "--apply");
             migrate::run(&dir, apply)
         }
+        Some("call") if cmd.len() >= 2 => {
+            let tool = &cmd[1];
+            let args = if cmd.len() > 2 {
+                let pairs: Vec<(String, json::Value)> = cmd[2..].iter()
+                    .filter_map(|a| {
+                        let (k, v) = a.split_once('=')?;
+                        Some((k.to_string(), json::Value::Str(v.to_string())))
+                    })
+                    .collect();
+                Some(json::Value::Obj(pairs))
+            } else { None };
+            mcp::dispatch(tool, args.as_ref(), &dir)
+        }
+        Some("call") => Err("usage: call <tool> [key=value ...]".into()),
         Some("serve") => {
             let d = if cmd.len() >= 3 && (cmd[1] == "--dir" || cmd[1] == "-d") {
                 std::path::PathBuf::from(&cmd[2])
@@ -250,6 +246,7 @@ fn print_help() {
         "  xref <topic>                 Find cross-references in other topics\n",
         "  migrate [--apply]            Find/fix entries without timestamps\n",
         "  digest                       Compact summary for MEMORY.md\n",
+        "  call <tool> [key=value ...]  Call an MCP tool directly (for testing)\n",
         "  serve                        MCP server over stdio\n",
         "  install                      Add to Claude Code settings\n",
         "  init [path]                  Initialize memory directory\n\n",

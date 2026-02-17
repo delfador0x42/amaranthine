@@ -1,6 +1,7 @@
 use std::fmt::Write;
 use std::fs;
 use std::path::Path;
+use crate::cache::CachedEntry;
 
 /// Filter options for search (date range + tag + topic scope + mode)
 pub struct Filter {
@@ -49,62 +50,10 @@ pub fn run_medium(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter
     }
     let files = search_files(dir, filter)?;
 
-    // Phase 1: read + pre-filter + lowercase
-    let mut corpus: Vec<PrepSection> = Vec::new();
-    for path in &files {
-        let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let name = path.file_stem().unwrap().to_string_lossy().to_string();
-        for section in parse_sections(&content) {
-            if !passes_filter(&section, filter) { continue; }
-            let text_lower = section.iter()
-                .map(|l| l.to_lowercase()).collect::<Vec<_>>().join("\n");
-            corpus.push(PrepSection {
-                name: name.clone(),
-                lines: section.iter().map(|s| s.to_string()).collect(),
-                text_lower,
-            });
-        }
-    }
-
-    // Phase 2: BM25 corpus stats
-    let n = corpus.len() as f64;
-    let total_words: usize = corpus.iter()
-        .map(|s| s.text_lower.split_whitespace().count()).sum();
-    let avgdl = if corpus.is_empty() { 1.0 } else { total_words as f64 / n };
-    let dfs: Vec<usize> = terms.iter()
-        .map(|t| corpus.iter().filter(|s| s.text_lower.contains(t.as_str())).count())
-        .collect();
-
-    // Phase 3: match + score
-    let mut mode = filter.mode;
-    let mut results: Vec<ScoredResult> = Vec::new();
-    for ps in &corpus {
-        if matches_text(&ps.text_lower, &terms, mode) {
-            let score = bm25_score(&ps.text_lower, &terms, n, avgdl, &dfs);
-            results.push(ScoredResult {
-                name: ps.name.clone(), section: ps.lines.clone(), score,
-            });
-        }
-    }
-
-    // AND→OR fallback
-    let mut fallback = false;
-    if results.is_empty() && mode == SearchMode::And && terms.len() >= 2 {
-        mode = SearchMode::Or;
-        for ps in &corpus {
-            if matches_text(&ps.text_lower, &terms, mode) {
-                let score = bm25_score(&ps.text_lower, &terms, n, avgdl, &dfs);
-                results.push(ScoredResult {
-                    name: ps.name.clone(), section: ps.lines.clone(), score,
-                });
-            }
-        }
-        fallback = !results.is_empty();
-    }
-
-    if !terms.is_empty() {
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    }
+    let (results, fallback) = crate::cache::with_corpus(&files, |groups| {
+        let corpus = build_corpus(groups, filter);
+        score_corpus(&corpus, &terms, filter.mode)
+    });
 
     let total = results.len();
     let show = limit.map(|l| total.min(l)).unwrap_or(total);
@@ -152,26 +101,26 @@ pub fn run_topics(dir: &Path, query: &str, filter: &Filter) -> Result<String, St
     }
     let files = search_files(dir, filter)?;
 
-    let count_hits = |mode: SearchMode| -> Vec<(String, usize)> {
-        let mut hits = Vec::new();
-        for path in &files {
-            let content = match fs::read_to_string(path) { Ok(c) => c, Err(_) => continue };
-            let name = path.file_stem().unwrap().to_string_lossy().to_string();
-            let sections = parse_sections(&content);
-            let n = sections.iter()
-                .filter(|s| passes_filter(s, filter) && matches_terms(s, &terms, mode))
-                .count();
-            if n > 0 { hits.push((name, n)); }
+    let (hits, fallback) = crate::cache::with_corpus(&files, |groups| {
+        let count_hits = |mode: SearchMode| -> Vec<(String, usize)> {
+            let mut hits = Vec::new();
+            for (name, entries) in &groups {
+                let n = entries.iter().filter(|e| {
+                    let refs: Vec<&str> = e.lines.iter().map(|s| s.as_str()).collect();
+                    passes_filter(&refs, filter) && matches_text(&e.text_lower, &terms, mode)
+                }).count();
+                if n > 0 { hits.push((name.to_string(), n)); }
+            }
+            hits
+        };
+        let mut hits = count_hits(filter.mode);
+        let mut fb = false;
+        if hits.is_empty() && filter.mode == SearchMode::And && terms.len() >= 2 {
+            hits = count_hits(SearchMode::Or);
+            fb = !hits.is_empty();
         }
-        hits
-    };
-
-    let mut hits = count_hits(filter.mode);
-    let mut fallback = false;
-    if hits.is_empty() && filter.mode == SearchMode::And && terms.len() >= 2 {
-        hits = count_hits(SearchMode::Or);
-        fallback = !hits.is_empty();
-    }
+        (hits, fb)
+    });
 
     let total: usize = hits.iter().map(|(_, n)| n).sum();
     let mut out = String::new();
@@ -199,33 +148,33 @@ pub fn count(dir: &Path, query: &str, filter: &Filter) -> Result<String, String>
     }
     let files = search_files(dir, filter)?;
 
-    let do_count = |mode: SearchMode| -> (usize, usize) {
-        let mut total = 0;
-        let mut topics = 0;
-        for path in &files {
-            let content = match fs::read_to_string(path) { Ok(c) => c, Err(_) => continue };
-            let sections = parse_sections(&content);
-            let file_hits = sections.iter()
-                .filter(|s| passes_filter(s, filter) && matches_terms(s, &terms, mode))
-                .count();
-            total += file_hits;
-            if file_hits > 0 { topics += 1; }
-        }
-        (total, topics)
-    };
+    crate::cache::with_corpus(&files, |groups| {
+        let do_count = |mode: SearchMode| -> (usize, usize) {
+            let mut total = 0;
+            let mut topics = 0;
+            for (_, entries) in &groups {
+                let hits = entries.iter().filter(|e| {
+                    let refs: Vec<&str> = e.lines.iter().map(|s| s.as_str()).collect();
+                    passes_filter(&refs, filter) && matches_text(&e.text_lower, &terms, mode)
+                }).count();
+                total += hits;
+                if hits > 0 { topics += 1; }
+            }
+            (total, topics)
+        };
 
-    let (total, topics) = do_count(filter.mode);
-    if total > 0 {
-        return Ok(format!("{total} matches across {topics} topics for '{query}'"));
-    }
-    // AND→OR fallback
-    if filter.mode == SearchMode::And && terms.len() >= 2 {
-        let (total, topics) = do_count(SearchMode::Or);
+        let (total, topics) = do_count(filter.mode);
         if total > 0 {
-            return Ok(format!("(no exact match — OR fallback) {total} matches across {topics} topics for '{query}'"));
+            return Ok(format!("{total} matches across {topics} topics for '{query}'"));
         }
-    }
-    Ok(format!("0 matches for '{query}'"))
+        if filter.mode == SearchMode::And && terms.len() >= 2 {
+            let (total, topics) = do_count(SearchMode::Or);
+            if total > 0 {
+                return Ok(format!("(no exact match — OR fallback) {total} matches across {topics} topics for '{query}'"));
+            }
+        }
+        Ok(format!("0 matches for '{query}'"))
+    })
 }
 
 /// BM25 parameters (Okapi BM25 standard values)
@@ -245,6 +194,65 @@ struct PrepSection {
     name: String,
     lines: Vec<String>,
     text_lower: String,
+    word_count: usize,
+}
+
+/// Build corpus from cached entries, applying filters.
+fn build_corpus(groups: Vec<(&str, &[CachedEntry])>, filter: &Filter) -> Vec<PrepSection> {
+    let mut corpus = Vec::new();
+    for (name, entries) in groups {
+        for entry in entries {
+            let section_refs: Vec<&str> = entry.lines.iter().map(|s| s.as_str()).collect();
+            if !passes_filter(&section_refs, filter) { continue; }
+            corpus.push(PrepSection {
+                name: name.to_string(),
+                lines: entry.lines.clone(),
+                text_lower: entry.text_lower.clone(),
+                word_count: entry.word_count,
+            });
+        }
+    }
+    corpus
+}
+
+/// Score corpus with BM25, return sorted results + fallback flag.
+fn score_corpus(corpus: &[PrepSection], terms: &[String], mode: SearchMode) -> (Vec<ScoredResult>, bool) {
+    let n = corpus.len() as f64;
+    let total_words: usize = corpus.iter().map(|s| s.word_count).sum();
+    let avgdl = if corpus.is_empty() { 1.0 } else { total_words as f64 / n };
+    let dfs: Vec<usize> = terms.iter()
+        .map(|t| corpus.iter().filter(|s| s.text_lower.contains(t.as_str())).count())
+        .collect();
+
+    let mut cur_mode = mode;
+    let mut results: Vec<ScoredResult> = Vec::new();
+    for ps in corpus {
+        if matches_text(&ps.text_lower, terms, cur_mode) {
+            let score = bm25_score(&ps.text_lower, terms, n, avgdl, &dfs);
+            results.push(ScoredResult {
+                name: ps.name.clone(), section: ps.lines.clone(), score,
+            });
+        }
+    }
+
+    let mut fallback = false;
+    if results.is_empty() && cur_mode == SearchMode::And && terms.len() >= 2 {
+        cur_mode = SearchMode::Or;
+        for ps in corpus {
+            if matches_text(&ps.text_lower, terms, cur_mode) {
+                let score = bm25_score(&ps.text_lower, terms, n, avgdl, &dfs);
+                results.push(ScoredResult {
+                    name: ps.name.clone(), section: ps.lines.clone(), score,
+                });
+            }
+        }
+        fallback = !results.is_empty();
+    }
+
+    if !terms.is_empty() {
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    (results, fallback)
 }
 
 /// BM25 score: IDF × saturated TF × header boost.
@@ -290,70 +298,11 @@ fn search(dir: &Path, query: &str, plain: bool, brief: bool, limit: Option<usize
     }
     let files = search_files(dir, filter)?;
 
-    // Phase 1: read all files once, pre-filter, pre-compute lowercase
-    let mut corpus: Vec<PrepSection> = Vec::new();
-    for path in &files {
-        let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let name = path.file_stem().unwrap().to_string_lossy().to_string();
-        for section in parse_sections(&content) {
-            if !passes_filter(&section, filter) { continue; }
-            let text_lower = section.iter()
-                .map(|l| l.to_lowercase()).collect::<Vec<_>>().join("\n");
-            corpus.push(PrepSection {
-                name: name.clone(),
-                lines: section.iter().map(|s| s.to_string()).collect(),
-                text_lower,
-            });
-        }
-    }
-
-    // Phase 2: BM25 corpus statistics
-    let n = corpus.len() as f64;
-    let total_words: usize = corpus.iter()
-        .map(|s| s.text_lower.split_whitespace().count()).sum();
-    let avgdl = if corpus.is_empty() { 1.0 } else { total_words as f64 / n };
-    let dfs: Vec<usize> = terms.iter()
-        .map(|t| corpus.iter().filter(|s| s.text_lower.contains(t.as_str())).count())
-        .collect();
-
-    // Phase 3: match + BM25 score
-    let mut mode = filter.mode;
-    let mut results: Vec<ScoredResult> = Vec::new();
-
-    for ps in &corpus {
-        if matches_text(&ps.text_lower, &terms, mode) {
-            let score = bm25_score(&ps.text_lower, &terms, n, avgdl, &dfs);
-            results.push(ScoredResult {
-                name: ps.name.clone(),
-                section: ps.lines.clone(),
-                score,
-            });
-        }
-    }
-
-    // Progressive fallback: AND → OR if no results
-    let mut fallback_note = String::new();
-    if results.is_empty() && mode == SearchMode::And && terms.len() >= 2 {
-        mode = SearchMode::Or;
-        for ps in &corpus {
-            if matches_text(&ps.text_lower, &terms, mode) {
-                let score = bm25_score(&ps.text_lower, &terms, n, avgdl, &dfs);
-                results.push(ScoredResult {
-                    name: ps.name.clone(),
-                    section: ps.lines.clone(),
-                    score,
-                });
-            }
-        }
-        if !results.is_empty() {
-            fallback_note = format!("(no exact match — showing {} OR results)\n", results.len());
-        }
-    }
-
-    // Sort by BM25 score descending
-    if !terms.is_empty() {
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    }
+    // Phase 1: get entries from cache (re-reads only changed files)
+    let (results, fallback) = crate::cache::with_corpus(&files, |groups| {
+        let corpus = build_corpus(groups, filter);
+        score_corpus(&corpus, &terms, filter.mode)
+    });
 
     let total = results.len();
     let show = match limit {
@@ -362,8 +311,8 @@ fn search(dir: &Path, query: &str, plain: bool, brief: bool, limit: Option<usize
     };
 
     let mut out = String::new();
-    if !fallback_note.is_empty() {
-        out.push_str(&fallback_note);
+    if fallback {
+        let _ = writeln!(out, "(no exact match — showing {} OR results)", results.len());
     }
 
     let mut last_file = String::new();

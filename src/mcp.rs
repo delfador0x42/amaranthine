@@ -6,6 +6,15 @@ use std::sync::Mutex;
 /// Session log: one-line summaries of stores this session.
 static SESSION_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// In-memory binary index — loaded on startup, rebuilt after writes.
+/// Eliminates fs::read on every index_search call.
+struct ServerIndex {
+    data: Vec<u8>,
+    state: crate::binquery::QueryState,
+}
+
+static INDEX: Mutex<Option<ServerIndex>> = Mutex::new(None);
+
 fn log_session(msg: String) {
     if let Ok(mut log) = SESSION_LOG.lock() {
         log.push(msg);
@@ -15,6 +24,10 @@ fn log_session(msg: String) {
 pub fn run(dir: &Path) -> Result<(), String> {
     let stdin = io::stdin();
     let stdout = io::stdout();
+
+    // Pre-warm cache + load binary index on startup
+    let _ = warm_cache(dir);
+    load_index(dir);
 
     // After re-exec, notify client that tools may have changed
     if std::env::var("AMARANTHINE_REEXEC").is_ok() {
@@ -127,7 +140,7 @@ fn init_result() -> Value {
         ])),
         ("serverInfo".into(), Value::Obj(vec![
             ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("1.5.0".into())),
+            ("version".into(), Value::Str("2.0.0".into())),
         ])),
     ])
 }
@@ -351,6 +364,14 @@ fn tool_list() -> Value {
               ("match_str", "string", "Substring to find the entry"),
               ("tags", "string", "Comma-separated tags to add"),
               ("remove", "string", "Comma-separated tags to remove")]),
+        tool("rebuild_index", "Rebuild the binary inverted index from all topic files. Enables fast index_search.",
+            &[], &[]),
+        tool("index_stats", "Show binary index and cache statistics.",
+            &[], &[]),
+        tool("index_search", "Search using the binary inverted index (~200ns per query). Requires rebuild_index first.",
+            &["query"],
+            &[("query", "string", "Search query"),
+              ("limit", "string", "Max results (default: 10)")]),
         tool("session", "Show what was stored this session. Tracks all store/batch_store calls since server started.",
             &[], &[]),
         tool("_reload", "Re-exec the server binary to pick up code changes. Sends tools/list_changed notification after reload.",
@@ -412,7 +433,33 @@ fn days_to_date(z: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, String> {
+fn warm_cache(dir: &Path) -> Result<(), String> {
+    let files = crate::config::list_search_files(dir)?;
+    crate::cache::with_corpus(&files, |_| {});
+    Ok(())
+}
+
+/// Load binary index into memory. Called on startup and after writes.
+fn load_index(dir: &Path) {
+    let index_path = dir.join("index.bin");
+    if let Ok(data) = std::fs::read(&index_path) {
+        let n = crate::binquery::entry_count(&data).unwrap_or(0);
+        let state = crate::binquery::QueryState::new(n);
+        if let Ok(mut guard) = INDEX.lock() {
+            *guard = Some(ServerIndex { data, state });
+        }
+    }
+}
+
+/// Invalidate cache for a topic, rebuild + reload binary index.
+fn after_write(dir: &Path, topic: &str) {
+    let f = crate::config::sanitize_topic(topic);
+    crate::cache::invalidate(&dir.join(format!("{f}.md")));
+    let _ = crate::inverted::rebuild(dir);
+    load_index(dir);
+}
+
+pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, String> {
     match name {
         "store" => {
             let topic = arg_str(args, "topic");
@@ -422,6 +469,7 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
             let force = arg_bool(args, "force");
             let terse = arg_bool(args, "terse");
             let result = crate::store::run_full(dir, &topic, &text, tags, force)?;
+            after_write(dir, &topic);
             log_session(format!("[{}] {}", topic,
                 result.lines().next().unwrap_or("stored")));
             if terse {
@@ -433,7 +481,9 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
         "append" => {
             let topic = arg_str(args, "topic");
             let text = arg_str(args, "text");
-            crate::store::append(dir, &topic, &text)
+            let result = crate::store::append(dir, &topic, &text)?;
+            after_write(dir, &topic);
+            Ok(result)
         }
         "batch_store" => {
             let verbose = arg_bool(args, "verbose");
@@ -466,6 +516,8 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
                 match crate::store::run_full(dir, topic, text, tags, false) {
                     Ok(msg) => {
                         ok_count += 1;
+                        let f = crate::config::sanitize_topic(topic);
+                        crate::cache::invalidate(&dir.join(format!("{f}.md")));
                         let first = msg.lines().next().unwrap_or(&msg);
                         results.push(format!("  [{}] {}", i + 1, first));
                         log_session(format!("[{}] {}", topic, first));
@@ -475,6 +527,10 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
                         results.push(format!("  [{}] err: {}", i + 1, first));
                     }
                 }
+            }
+            if ok_count > 0 {
+                let _ = crate::inverted::rebuild(dir);
+                load_index(dir);
             }
             if verbose {
                 Ok(format!("batch: {ok_count}/{} stored\n{}", items.len(), results.join("\n")))
@@ -541,7 +597,7 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
             let idx_str = arg_str(args, "index");
             let m = arg_str(args, "match_str");
 
-            if !idx_str.is_empty() {
+            let result = if !idx_str.is_empty() {
                 let idx: usize = idx_str.parse()
                     .map_err(|_| format!("invalid index: '{idx_str}'"))?;
                 crate::delete::run_by_index(dir, &topic, idx)
@@ -549,11 +605,17 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
                 crate::delete::run(dir, &topic, false, false, Some(m.as_str()))
             } else {
                 crate::delete::run(dir, &topic, true, false, None)
-            }
+            }?;
+            after_write(dir, &topic);
+            Ok(result)
         }
         "delete_topic" => {
             let topic = arg_str(args, "topic");
-            crate::delete::run(dir, &topic, false, true, None)
+            let result = crate::delete::run(dir, &topic, false, true, None)?;
+            crate::cache::invalidate_all();
+            let _ = crate::inverted::rebuild(dir);
+            load_index(dir);
+            Ok(result)
         }
         "append_entry" => {
             let topic = arg_str(args, "topic");
@@ -562,7 +624,7 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
             let needle = arg_str(args, "match_str");
             let tag = arg_str(args, "tag");
 
-            if !idx_str.is_empty() {
+            let result = if !idx_str.is_empty() {
                 let idx: usize = idx_str.parse()
                     .map_err(|_| format!("invalid index: '{idx_str}'"))?;
                 crate::edit::append_by_index(dir, &topic, idx, &text)
@@ -570,7 +632,9 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
                 crate::edit::append_by_tag(dir, &topic, &tag, &text)
             } else {
                 crate::edit::append(dir, &topic, &needle, &text)
-            }
+            }?;
+            after_write(dir, &topic);
+            Ok(result)
         }
         "update_entry" => {
             let topic = arg_str(args, "topic");
@@ -578,13 +642,15 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
             let idx_str = arg_str(args, "index");
             let needle = arg_str(args, "match_str");
 
-            if !idx_str.is_empty() {
+            let result = if !idx_str.is_empty() {
                 let idx: usize = idx_str.parse()
                     .map_err(|_| format!("invalid index: '{idx_str}'"))?;
                 crate::edit::run_by_index(dir, &topic, idx, &text)
             } else {
                 crate::edit::run(dir, &topic, &needle, &text)
-            }
+            }?;
+            after_write(dir, &topic);
+            Ok(result)
         }
         "read_topic" => {
             let topic = arg_str(args, "topic");
@@ -609,16 +675,26 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
         "compact" => {
             let topic = arg_str(args, "topic");
             let apply = arg_str(args, "apply") == "true";
-            if topic.is_empty() {
+            let result = if topic.is_empty() {
                 crate::compact::scan(dir)
             } else {
                 crate::compact::run(dir, &topic, apply)
+            }?;
+            if apply {
+                crate::cache::invalidate_all();
+                let _ = crate::inverted::rebuild(dir);
+                load_index(dir);
             }
+            Ok(result)
         }
         "export" => crate::export::export(dir),
         "import" => {
             let json = arg_str(args, "json");
-            crate::export::import(dir, &json)
+            let result = crate::export::import(dir, &json)?;
+            crate::cache::invalidate_all();
+            let _ = crate::inverted::rebuild(dir);
+            load_index(dir);
+            Ok(result)
         }
         "xref" => {
             let topic = arg_str(args, "topic");
@@ -638,7 +714,11 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
         "rename_topic" => {
             let topic = arg_str(args, "topic");
             let new_name = arg_str(args, "new_name");
-            crate::edit::rename_topic(dir, &topic, &new_name)
+            let result = crate::edit::rename_topic(dir, &topic, &new_name)?;
+            crate::cache::invalidate_all();
+            let _ = crate::inverted::rebuild(dir);
+            load_index(dir);
+            Ok(result)
         }
         "tag_entry" => {
             let topic = arg_str(args, "topic");
@@ -652,7 +732,44 @@ fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, Stri
             let needle = if needle.is_empty() { None } else { Some(needle.as_str()) };
             let add = if add_tags.is_empty() { None } else { Some(add_tags.as_str()) };
             let rm = if rm_tags.is_empty() { None } else { Some(rm_tags.as_str()) };
-            crate::edit::tag_entry(dir, &topic, idx, needle, add, rm)
+            let result = crate::edit::tag_entry(dir, &topic, idx, needle, add, rm)?;
+            after_write(dir, &topic);
+            Ok(result)
+        }
+        "rebuild_index" => {
+            crate::cache::invalidate_all();
+            let result = crate::inverted::rebuild(dir)?;
+            load_index(dir);
+            Ok(result)
+        }
+        "index_stats" => {
+            let guard = INDEX.lock().map_err(|e| e.to_string())?;
+            let data = match guard.as_ref() {
+                Some(idx) => std::borrow::Cow::Borrowed(idx.data.as_slice()),
+                None => {
+                    drop(guard);
+                    std::borrow::Cow::Owned(std::fs::read(dir.join("index.bin"))
+                        .map_err(|e| format!("index.bin: {e}"))?)
+                }
+            };
+            let mut out = crate::binquery::index_info(&data)?;
+            let cache = crate::cache::stats();
+            out.push_str(&format!("\n{cache}"));
+            Ok(out)
+        }
+        "index_search" => {
+            let query = arg_str(args, "query");
+            let limit = arg_str(args, "limit").parse::<usize>().unwrap_or(10);
+            let guard = INDEX.lock().map_err(|e| e.to_string())?;
+            let data = match guard.as_ref() {
+                Some(idx) => std::borrow::Cow::Borrowed(idx.data.as_slice()),
+                None => {
+                    drop(guard);
+                    std::borrow::Cow::Owned(std::fs::read(dir.join("index.bin"))
+                        .map_err(|e| format!("index.bin: {e}"))?)
+                }
+            };
+            crate::binquery::search(&data, &query, limit)
         }
         "session" => {
             let log = SESSION_LOG.lock().map_err(|e| e.to_string())?;
