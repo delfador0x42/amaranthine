@@ -61,6 +61,11 @@ pub fn append_delete(log_path: &Path, target_offset: u32) -> Result<(), String> 
 /// Read a single entry from log at given offset.
 pub fn read_entry(log_path: &Path, offset: u32) -> Result<LogEntry, String> {
     let mut f = File::open(log_path).map_err(|e| format!("open data.log: {e}"))?;
+    read_entry_from(&mut f, offset)
+}
+
+/// Read a single entry from an already-open file handle (avoids re-open per call).
+pub fn read_entry_from(f: &mut File, offset: u32) -> Result<LogEntry, String> {
     f.seek(SeekFrom::Start(offset as u64)).map_err(|e| e.to_string())?;
     let mut hdr = [0u8; ENTRY_HEADER_SIZE];
     f.read_exact(&mut hdr).map_err(|e| format!("read entry header: {e}"))?;
@@ -176,6 +181,18 @@ pub fn compact_log(dir: &Path) -> Result<String, String> {
     fs::rename(&tmp, &log_path).map_err(|e| e.to_string())?;
     let after = fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
     Ok(format!("compacted: {} entries, {} → {} bytes", entries.len(), before, after))
+}
+
+/// Append one entry to an already-open file handle (no fsync). For batch writes.
+pub fn append_entry_to(f: &mut File, topic: &str, body: &str, ts_min: i32) -> Result<u32, String> {
+    let offset = f.seek(SeekFrom::End(0)).map_err(|e| e.to_string())? as u32;
+    let tb = topic.as_bytes();
+    let bb = body.as_bytes();
+    let hdr: [u8; ENTRY_HEADER_SIZE] = entry_header(tb.len() as u8, bb.len() as u32, ts_min);
+    f.write_all(&hdr).map_err(|e| e.to_string())?;
+    f.write_all(tb).map_err(|e| e.to_string())?;
+    f.write_all(bb).map_err(|e| e.to_string())?;
+    Ok(offset)
 }
 
 fn entry_header(topic_len: u8, body_len: u32, ts_min: i32) -> [u8; ENTRY_HEADER_SIZE] {

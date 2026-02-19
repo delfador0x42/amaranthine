@@ -27,7 +27,7 @@ pub fn run_full(
     let ts_min = ts.to_minutes() as i32;
 
     // Dupe check
-    let dupe_warn = if !force { check_dupe(&log_path, topic, &text) } else { None };
+    let dupe_warn = if !force { check_dupe(dir, topic, &text) } else { None };
     let topic_hint = suggest_topic(dir, topic);
 
     crate::datalog::append_entry(&log_path, topic, &body, ts_min)?;
@@ -51,6 +51,17 @@ pub fn run_batch_entry(
     let body = build_body(text, cleaned_tags.as_deref(), source);
     let ts_min = LocalTime::now().to_minutes() as i32;
     crate::datalog::append_entry(&log_path, topic, &body, ts_min)?;
+    Ok(format!("stored in {topic}"))
+}
+
+/// F3: Lean write using pre-opened file handle — no lock, no dupe check, no fsync.
+pub fn run_batch_entry_to(
+    f: &mut std::fs::File, topic: &str, text: &str, tags: Option<&str>, source: Option<&str>,
+) -> Result<String, String> {
+    let cleaned_tags = tags.map(|t| normalize_tags(t));
+    let body = build_body(text, cleaned_tags.as_deref(), source);
+    let ts_min = LocalTime::now().to_minutes() as i32;
+    crate::datalog::append_entry_to(f, topic, &body, ts_min)?;
     Ok(format!("stored in {topic}"))
 }
 
@@ -112,45 +123,39 @@ fn singularize(s: &str) -> String {
     s.to_string()
 }
 
-const STOP_WORDS: &[&str] = &[
-    "that", "this", "with", "from", "have", "been", "were", "will", "when",
-    "which", "their", "there", "about", "would", "could", "should", "into",
-    "also", "each", "does", "just", "more", "than", "then", "them", "some",
-    "only", "other", "very", "after", "before", "most", "same", "both",
-    "used", "uses", "using", "need", "added", "file", "path", "type", "name",
-];
-
-fn check_dupe(log_path: &Path, topic: &str, new_text: &str) -> Option<String> {
-    let entries = crate::datalog::iter_live(log_path).ok()?;
-    let new_lower = new_text.to_lowercase();
-    let mut seen = std::collections::HashSet::new();
-    let words: Vec<&str> = new_lower.split_whitespace()
-        .filter(|w| w.len() >= 6)
-        .filter(|w| !STOP_WORDS.contains(w))
-        .filter(|w| seen.insert(*w))
-        .collect();
-    if words.len() < 6 { return None; }
-    for e in entries.iter().filter(|e| e.topic == topic) {
-        let body_lower = e.body.to_lowercase();
-        let matches = words.iter().filter(|w| body_lower.contains(**w)).count();
-        if matches as f64 / words.len() as f64 > 0.90 {
-            let preview = e.body.trim().lines()
-                .find(|l| !l.starts_with('[') && !l.trim().is_empty())
-                .unwrap_or("").trim();
-            let short = if preview.len() > 100 {
-                let mut end = 100;
-                while end > 0 && !preview.is_char_boundary(end) { end -= 1; }
-                format!("{}...", &preview[..end])
-            } else { preview.to_string() };
-            return Some(short);
+fn check_dupe(dir: &Path, topic: &str, new_text: &str) -> Option<String> {
+    crate::cache::with_corpus(dir, |cached| {
+        // F7: Use cached token_set for Jaccard similarity instead of body.to_lowercase
+        let new_tokens: std::collections::HashSet<String> = crate::text::tokenize(new_text)
+            .into_iter().filter(|t| t.len() >= 3).collect();
+        if new_tokens.len() < 6 { return None; }
+        for e in cached.iter().filter(|e| e.topic == topic) {
+            let intersection = new_tokens.iter().filter(|t| e.token_set.contains(*t)).count();
+            let union = new_tokens.len() + e.token_set.len() - intersection;
+            if union > 0 && intersection as f64 / union as f64 > 0.70 {
+                let preview = e.body.trim().lines()
+                    .find(|l| !l.starts_with('[') && !l.trim().is_empty())
+                    .unwrap_or("").trim();
+                let short = if preview.len() > 100 {
+                    let mut end = 100;
+                    while end > 0 && !preview.is_char_boundary(end) { end -= 1; }
+                    format!("{}...", &preview[..end])
+                } else { preview.to_string() };
+                return Some(short);
+            }
         }
-    }
-    None
+        None
+    }).ok().flatten()
 }
 
 fn suggest_topic(dir: &Path, new_topic: &str) -> Option<String> {
-    let data = std::fs::read(dir.join("index.bin")).ok()?;
-    let topics = crate::binquery::topic_table(&data).ok()?;
+    // F4: Try cached index first, fall back to disk read
+    let topics = crate::mcp::with_index(|data| {
+        crate::binquery::topic_table(data).ok()
+    }).flatten().or_else(|| {
+        std::fs::read(dir.join("index.bin")).ok()
+            .and_then(|data| crate::binquery::topic_table(&data).ok())
+    })?;
     if topics.iter().any(|(_, name, _)| name == new_topic) { return None; }
     let parts: Vec<&str> = new_topic.split('-').collect();
     let similar: Vec<String> = topics.iter()

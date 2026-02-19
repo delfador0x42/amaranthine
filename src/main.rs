@@ -88,9 +88,9 @@ fn main() {
             } else if topics_only {
                 search::run_topics(&dir, &q, &filter)
             } else if brief {
-                search::run_brief(&dir, &q, limit, &filter)
+                search::run_brief(&dir, &q, limit, &filter, None)
             } else {
-                search::run(&dir, &q, plain, limit, &filter)
+                search::run(&dir, &q, plain, limit, &filter, None)
             }
         }
         Some("search") => Err("usage: search <query> [--brief|--count|--topics] [--limit N] [--after DATE] [--before DATE] [--tag TAG]".into()),

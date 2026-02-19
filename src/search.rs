@@ -6,10 +6,11 @@ use std::path::Path;
 use crate::text::{query_terms, truncate, extract_tags};
 pub use crate::score::{Filter, SearchMode};
 
-pub fn run(dir: &Path, query: &str, plain: bool, limit: Option<usize>, filter: &Filter) -> Result<String, String> {
+pub fn run(dir: &Path, query: &str, plain: bool, limit: Option<usize>, filter: &Filter,
+           index_data: Option<&[u8]>) -> Result<String, String> {
     let terms = query_terms(query);
     if terms.is_empty() && !filter.is_active() { return Err("provide a query or filter".into()); }
-    let (results, fallback) = crate::score::search_scored(dir, &terms, filter, limit)?;
+    let (results, fallback) = crate::score::search_scored(dir, &terms, filter, limit, index_data)?;
     let total = results.len();
     let show = limit.map(|l| total.min(l)).unwrap_or(total);
 
@@ -22,8 +23,8 @@ pub fn run(dir: &Path, query: &str, plain: bool, limit: Option<usize>, filter: &
             else { let _ = writeln!(out, "\n\x1b[1;36m--- {} ---\x1b[0m", r.name); }
             last_file = r.name.clone();
         }
-        for line in &r.lines {
-            if !terms.is_empty() && terms.iter().any(|t| line.to_lowercase().contains(t.as_str())) {
+        for line in r.lines.iter() {
+            if !terms.is_empty() && terms.iter().any(|t| contains_ci(line, t)) {
                 if plain { let _ = writeln!(out, "> {line}"); }
                 else { let _ = writeln!(out, "\x1b[1;33m{line}\x1b[0m"); }
             } else { let _ = writeln!(out, "{line}"); }
@@ -36,10 +37,11 @@ pub fn run(dir: &Path, query: &str, plain: bool, limit: Option<usize>, filter: &
     Ok(out)
 }
 
-pub fn run_brief(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter) -> Result<String, String> {
+pub fn run_brief(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter,
+                 index_data: Option<&[u8]>) -> Result<String, String> {
     let terms = query_terms(query);
     if terms.is_empty() && !filter.is_active() { return Err("provide a query or filter".into()); }
-    let (results, fallback) = crate::score::search_scored(dir, &terms, filter, limit)?;
+    let (results, fallback) = crate::score::search_scored(dir, &terms, filter, limit, index_data)?;
     let total = results.len();
     let show = limit.map(|l| total.min(l)).unwrap_or(total);
     let mut out = String::new();
@@ -58,10 +60,11 @@ pub fn run_brief(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter)
     Ok(out)
 }
 
-pub fn run_medium(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter) -> Result<String, String> {
+pub fn run_medium(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter,
+                  index_data: Option<&[u8]>) -> Result<String, String> {
     let terms = query_terms(query);
     if terms.is_empty() && !filter.is_active() { return Err("provide a query or filter".into()); }
-    let (results, fallback) = crate::score::search_scored(dir, &terms, filter, limit)?;
+    let (results, fallback) = crate::score::search_scored(dir, &terms, filter, limit, index_data)?;
     let total = results.len();
     let show = limit.map(|l| total.min(l)).unwrap_or(total);
     let mut out = String::new();
@@ -95,7 +98,7 @@ pub fn run_topics(dir: &Path, query: &str, filter: &Filter) -> Result<String, St
     let corpus = crate::score::load_corpus(dir, filter)?;
     let count_fn = |mode: SearchMode| -> Vec<(String, usize)> {
         let mut hits: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-        for ps in &corpus { if crate::score::matches_tokens(&ps.tokens, &terms, mode) { *hits.entry(ps.name.clone()).or_insert(0) += 1; } }
+        for ps in &corpus { if crate::score::matches_tokens(&ps.token_set, &terms, mode) { *hits.entry(ps.name.clone()).or_insert(0) += 1; } }
         hits.into_iter().collect()
     };
     let mut hits = count_fn(filter.mode);
@@ -122,7 +125,7 @@ pub fn count(dir: &Path, query: &str, filter: &Filter) -> Result<String, String>
     let corpus = crate::score::load_corpus(dir, filter)?;
     let do_count = |mode: SearchMode| -> (usize, usize) {
         let mut total = 0; let mut topics = std::collections::HashSet::new();
-        for ps in &corpus { if crate::score::matches_tokens(&ps.tokens, &terms, mode) { total += 1; topics.insert(ps.name.clone()); } }
+        for ps in &corpus { if crate::score::matches_tokens(&ps.token_set, &terms, mode) { total += 1; topics.insert(ps.name.clone()); } }
         (total, topics.len())
     };
     let (total, topics) = do_count(filter.mode);
@@ -134,10 +137,11 @@ pub fn count(dir: &Path, query: &str, filter: &Filter) -> Result<String, String>
     Ok(format!("0 matches for '{query}'"))
 }
 
-pub fn run_grouped(dir: &Path, query: &str, limit_per_topic: Option<usize>, filter: &Filter) -> Result<String, String> {
+pub fn run_grouped(dir: &Path, query: &str, limit_per_topic: Option<usize>, filter: &Filter,
+                   index_data: Option<&[u8]>) -> Result<String, String> {
     let terms = query_terms(query);
     if terms.is_empty() { return Err("query required for entity search".into()); }
-    let (results, fallback) = crate::score::search_scored(dir, &terms, filter, None)?;
+    let (results, fallback) = crate::score::search_scored(dir, &terms, filter, None, index_data)?;
     if results.is_empty() { return Ok(no_match_message(query, filter, dir)); }
     let cap = limit_per_topic.unwrap_or(5);
     let mut groups: std::collections::BTreeMap<String, Vec<&crate::score::ScoredResult>> = std::collections::BTreeMap::new();
@@ -164,6 +168,15 @@ pub fn run_grouped(dir: &Path, query: &str, limit_per_topic: Option<usize>, filt
         let _ = writeln!(out);
     }
     Ok(out)
+}
+
+/// Case-insensitive substring check without allocation.
+/// Needle must already be lowercase (query_terms guarantees this).
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    let nb = needle.as_bytes();
+    if nb.len() > haystack.len() { return false; }
+    haystack.as_bytes().windows(nb.len())
+        .any(|w| w.iter().zip(nb).all(|(h, n)| h.to_ascii_lowercase() == *n))
 }
 
 fn no_match_message(query: &str, filter: &Filter, dir: &Path) -> String {

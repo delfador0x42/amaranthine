@@ -15,7 +15,6 @@ struct EntryInfo {
     date_minutes: i32,
     source: String,
     log_offset: u32,
-    text_lower: String,
     tags: Vec<String>,
 }
 
@@ -62,21 +61,65 @@ impl IndexBuilder {
 
         self.entries.push(EntryInfo {
             topic_id, word_count: wc.min(u16::MAX as usize) as u16,
-            snippet, date_minutes, source, log_offset,
-            text_lower: text_lower.to_string(), tags,
+            snippet, date_minutes, source, log_offset, tags,
         });
         entry_id
     }
 
-    fn compute_xrefs(&self) -> Vec<XrefEdge> {
-        let mut edges: HashMap<(u16, u16), u16> = HashMap::new();
-        let names_lower: Vec<(u16, String)> = self.topics.iter().enumerate()
-            .map(|(i, n)| (i as u16, n.to_lowercase())).collect();
+    /// Like add_entry but accepts pre-computed tokens (skips tokenize call).
+    pub fn add_entry_with_tokens(
+        &mut self, topic_id: u16, _text_lower: &str, snippet: String,
+        date_minutes: i32, source: String, log_offset: u32, tags: Vec<String>,
+        tokens: &[String],
+    ) -> u32 {
+        let entry_id = self.entries.len() as u32;
+        let wc = tokens.len();
+        self.total_words += wc;
+        let mut tf_map: HashMap<&str, u16> = HashMap::new();
+        for t in tokens { *tf_map.entry(t.as_str()).or_insert(0) += 1; }
+        for (term, tf) in tf_map {
+            if term.is_empty() || term.len() < 2 { continue; }
+            self.terms.entry(term.to_string()).or_default().push((entry_id, tf));
+        }
+        for tag in &tags { *self.tag_freq.entry(tag.clone()).or_insert(0) += 1; }
+        self.entries.push(EntryInfo {
+            topic_id, word_count: wc.min(u16::MAX as usize) as u16,
+            snippet, date_minutes, source, log_offset, tags,
+        });
+        entry_id
+    }
 
-        for entry in &self.entries {
-            for &(dst, ref name) in &names_lower {
-                if dst == entry.topic_id || name.len() < 3 { continue; }
-                if entry.text_lower.contains(name.as_str()) {
+    /// F11: Xref detection via term index — O(topics × avg_posting) instead of O(entries × topics).
+    fn compute_xrefs(&self) -> Vec<XrefEdge> {
+        use std::collections::HashSet;
+        let mut edges: HashMap<(u16, u16), u16> = HashMap::new();
+
+        for (i, name) in self.topics.iter().enumerate() {
+            let dst = i as u16;
+            let name_tokens = crate::text::tokenize(name);
+            let name_tokens: Vec<&str> = name_tokens.iter()
+                .filter(|t| t.len() >= 2).map(|s| s.as_str()).collect();
+            if name_tokens.is_empty() { continue; }
+
+            // Intersect posting lists for all tokens of this topic name
+            let mut candidates: Option<HashSet<u32>> = None;
+            for token in &name_tokens {
+                if let Some(postings) = self.terms.get(*token) {
+                    let ids: HashSet<u32> = postings.iter().map(|(eid, _)| *eid).collect();
+                    candidates = Some(match candidates {
+                        Some(prev) => prev.intersection(&ids).copied().collect(),
+                        None => ids,
+                    });
+                } else {
+                    candidates = Some(HashSet::new());
+                    break;
+                }
+            }
+
+            if let Some(cands) = candidates {
+                for eid in cands {
+                    let entry = &self.entries[eid as usize];
+                    if entry.topic_id == dst { continue; }
                     *edges.entry((entry.topic_id, dst)).or_insert(0) += 1;
                 }
             }
@@ -126,6 +169,8 @@ impl IndexBuilder {
         }
 
         // Snippet pool + source pool + entry metadata
+        // F6: Cache fs::metadata calls for compute_confidence
+        let mut mtime_cache: HashMap<String, Option<std::time::SystemTime>> = HashMap::new();
         let mut snippets = Vec::<u8>::new();
         let mut sources = Vec::<u8>::new();
         let mut metas = Vec::<EntryMeta>::new();
@@ -146,7 +191,7 @@ impl IndexBuilder {
             };
 
             let tag_bitmap = self.entry_tag_bitmap(&info.tags, &tag_to_bit);
-            let confidence = compute_confidence(&info.source, info.date_minutes);
+            let confidence = compute_confidence_cached(&info.source, info.date_minutes, &mut mtime_cache);
             let epoch_days = if info.date_minutes > 0 {
                 (info.date_minutes as u32 / 1440) as u16
             } else { 0 };
@@ -255,8 +300,8 @@ impl IndexBuilder {
 
 // --- Public functions ---
 
-/// Build index from data.log. Migrates .md → data.log on first run.
-pub fn rebuild(dir: &Path) -> Result<String, String> {
+/// Build index from data.log. Uses corpus cache when available to skip tokenization.
+pub fn rebuild(dir: &Path) -> Result<(String, Vec<u8>), String> {
     let log_path = crate::datalog::ensure_log(dir)?;
     let log_size = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
 
@@ -269,27 +314,31 @@ pub fn rebuild(dir: &Path) -> Result<String, String> {
         }
     }
 
-    let entries = crate::datalog::iter_live(&log_path)?;
-    let mut builder = IndexBuilder::new();
+    // Try corpus cache first (pre-tokenized entries, skip tokenize() calls)
+    let (bytes, ne, nt, ntop) = crate::cache::with_corpus(dir, |cached| {
+        let mut builder = IndexBuilder::new();
+        for e in cached {
+            let tid = builder.add_topic(&e.topic);
+            let text_lower = e.body.to_lowercase();
+            let source = crate::text::extract_source(&e.body).unwrap_or_default();
+            let tags = extract_entry_tags(&e.body);
+            let snippet = build_snippet(&e.topic, e.timestamp_min, &e.body);
+            builder.add_entry_with_tokens(
+                tid, &text_lower, snippet, e.timestamp_min, source, e.offset, tags,
+                &e.tokens,
+            );
+        }
+        let ne = builder.entries.len();
+        let nt = builder.terms.len();
+        let ntop = builder.topics.len();
+        (builder.build(), ne, nt, ntop)
+    })?;
 
-    for e in &entries {
-        let tid = builder.add_topic(&e.topic);
-        let text_lower = e.body.to_lowercase();
-        let source = crate::text::extract_source(&e.body).unwrap_or_default();
-        let tags = extract_entry_tags(&e.body);
-        let snippet = build_snippet(&e.topic, e.timestamp_min, &e.body);
-        builder.add_entry(tid, &text_lower, snippet, e.timestamp_min, source, e.offset, tags);
-    }
-
-    let bytes = builder.build();
     let index_path = dir.join("index.bin");
     std::fs::write(&index_path, &bytes).map_err(|e| e.to_string())?;
-
-    let ne = builder.entries.len();
-    let nt = builder.terms.len();
-    let ntop = builder.topics.len();
-    Ok(format!("index v2: {ne} entries, {nt} terms, {ntop} topics, {} bytes",
-        bytes.len()))
+    let msg = format!("index v2: {ne} entries, {nt} terms, {ntop} topics, {} bytes",
+        bytes.len());
+    Ok((msg, bytes))
 }
 
 fn extract_entry_tags(body: &str) -> Vec<String> {
@@ -299,12 +348,19 @@ fn extract_entry_tags(body: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn compute_confidence(source: &str, date_minutes: i32) -> u8 {
+/// F6: Cached variant — one stat() per unique source path instead of per entry.
+fn compute_confidence_cached(
+    source: &str, date_minutes: i32,
+    cache: &mut HashMap<String, Option<std::time::SystemTime>>,
+) -> u8 {
     if source.is_empty() { return 255; }
     let path = source.split(':').next().unwrap_or(source);
-    let file_mtime = match std::fs::metadata(path).and_then(|m| m.modified()) {
-        Ok(t) => t,
-        Err(_) => return 255,
+    let mtime = cache.entry(path.to_string()).or_insert_with(|| {
+        std::fs::metadata(path).and_then(|m| m.modified()).ok()
+    });
+    let file_mtime = match mtime {
+        Some(t) => *t,
+        None => return 255,
     };
     let entry_secs = (date_minutes as u64) * 60;
     let entry_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(entry_secs);

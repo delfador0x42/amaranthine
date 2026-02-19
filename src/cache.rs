@@ -2,6 +2,7 @@
 //! Eliminates file I/O + tokenization on repeated corpus-path searches.
 //! Cache holds pre-tokenized entries; filters applied at query time.
 
+use std::collections::{HashSet, HashMap};
 use std::sync::Mutex;
 use std::time::SystemTime;
 use std::path::Path;
@@ -12,6 +13,8 @@ pub struct CachedEntry {
     pub timestamp_min: i32,
     pub offset: u32,
     pub tokens: Vec<String>,
+    pub token_set: HashSet<String>,
+    pub tf_map: HashMap<String, usize>,
     pub word_count: usize,
     pub tags_raw: Option<String>,
 }
@@ -51,6 +54,9 @@ where F: FnOnce(&[CachedEntry]) -> R {
     let entries: Vec<CachedEntry> = raw_entries.iter().map(|e| {
         let tokens = crate::text::tokenize(&e.body);
         let word_count = tokens.len();
+        let token_set: HashSet<String> = tokens.iter().cloned().collect();
+        let mut tf_map: HashMap<String, usize> = HashMap::new();
+        for t in &tokens { *tf_map.entry(t.clone()).or_insert(0) += 1; }
         let tags_raw = e.body.lines()
             .find(|l| l.starts_with("[tags: "))
             .map(|l| l.to_string());
@@ -59,7 +65,7 @@ where F: FnOnce(&[CachedEntry]) -> R {
             body: e.body.clone(),
             timestamp_min: e.timestamp_min,
             offset: e.offset,
-            tokens, word_count, tags_raw,
+            tokens, token_set, tf_map, word_count, tags_raw,
         }
     }).collect();
 

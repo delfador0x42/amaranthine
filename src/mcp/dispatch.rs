@@ -43,6 +43,11 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
                 ));
             }
             let _lock = crate::lock::FileLock::acquire(dir)?;
+            // F3: Open file once, write N entries, fsync once (was N opens + N fsyncs)
+            crate::config::ensure_dir(dir)?;
+            let log_path = crate::datalog::ensure_log(dir)?;
+            let mut log_file = std::fs::OpenOptions::new().append(true).open(&log_path)
+                .map_err(|e| format!("open data.log: {e}"))?;
             let mut ok_count = 0;
             let mut results = Vec::new();
             let mut seen: Vec<(String, String)> = Vec::new();
@@ -64,7 +69,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
                     continue;
                 }
                 seen.push(key);
-                match crate::store::run_batch_entry(dir, topic, text, tags, source) {
+                match crate::store::run_batch_entry_to(&mut log_file, topic, text, tags, source) {
                     Ok(msg) => {
                         ok_count += 1;
                         let first = msg.lines().next().unwrap_or(&msg);
@@ -77,6 +82,11 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
                     }
                 }
             }
+            // Single fsync after all entries written
+            if ok_count > 0 {
+                let _ = log_file.sync_all();
+            }
+            drop(log_file);
             drop(_lock);
             if ok_count > 0 {
                 super::after_write(dir, "");
@@ -92,23 +102,36 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             let limit = arg_str(args, "limit").parse::<usize>().ok();
             let detail = arg_str(args, "detail");
             let filter = build_filter(args);
-            match detail.as_str() {
-                "full" => crate::search::run(dir, &query, true, limit, &filter),
-                "brief" => crate::search::run_brief(dir, &query, limit, &filter),
-                _ => crate::search::run_medium(dir, &query, limit, &filter),
-            }
+            // F2: Pass cached index data to avoid disk reads
+            let guard = super::INDEX.lock().map_err(|e| e.to_string())?;
+            let idx = guard.as_ref().map(|i| i.data.as_slice());
+            let result = match detail.as_str() {
+                "full" => crate::search::run(dir, &query, true, limit, &filter, idx),
+                "brief" => crate::search::run_brief(dir, &query, limit, &filter, idx),
+                _ => crate::search::run_medium(dir, &query, limit, &filter, idx),
+            };
+            drop(guard);
+            result
         }
         "search_brief" => {
             let query = arg_str(args, "query");
             let limit = arg_str(args, "limit").parse::<usize>().ok();
             let filter = build_filter(args);
-            crate::search::run_brief(dir, &query, limit, &filter)
+            let guard = super::INDEX.lock().map_err(|e| e.to_string())?;
+            let idx = guard.as_ref().map(|i| i.data.as_slice());
+            let result = crate::search::run_brief(dir, &query, limit, &filter, idx);
+            drop(guard);
+            result
         }
         "search_medium" => {
             let query = arg_str(args, "query");
             let limit = arg_str(args, "limit").parse::<usize>().ok();
             let filter = build_filter(args);
-            crate::search::run_medium(dir, &query, limit, &filter)
+            let guard = super::INDEX.lock().map_err(|e| e.to_string())?;
+            let idx = guard.as_ref().map(|i| i.data.as_slice());
+            let result = crate::search::run_medium(dir, &query, limit, &filter, idx);
+            drop(guard);
+            result
         }
         "search_count" => {
             let query = arg_str(args, "query");
@@ -278,8 +301,8 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             Ok(result)
         }
         "rebuild_index" => {
-            let result = crate::inverted::rebuild(dir)?;
-            super::load_index(dir);
+            let (result, bytes) = crate::inverted::rebuild(dir)?;
+            super::store_index(bytes);
             Ok(result)
         }
         "index_stats" => {
@@ -324,7 +347,11 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             let query = arg_str(args, "query");
             let limit = arg_str(args, "limit").parse::<usize>().ok();
             let filter = build_filter(args);
-            crate::search::run_grouped(dir, &query, limit, &filter)
+            let guard = super::INDEX.lock().map_err(|e| e.to_string())?;
+            let idx = guard.as_ref().map(|i| i.data.as_slice());
+            let result = crate::search::run_grouped(dir, &query, limit, &filter, idx);
+            drop(guard);
+            result
         }
         "reconstruct" => {
             let query = arg_str(args, "query");

@@ -1,2 +1,20 @@
-/target/
+target/
+
+.build/
+**/.build/
+.swiftpm/
+DerivedData/
+
+
+references/
+
+ipsw_clean_dmg/
+
+notes/
+
+.claude/
+.vscode/
+.xcodebuildmcp/
+
+
 

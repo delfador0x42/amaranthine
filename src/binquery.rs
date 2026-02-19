@@ -103,6 +103,19 @@ pub fn search_v2(data: &[u8], query: &str, limit: usize) -> Result<Vec<SearchHit
 pub fn search_v2_filtered(
     data: &[u8], query: &str, filter: &FilterPred, limit: usize,
 ) -> Result<Vec<SearchHit>, String> {
+    search_v2_core(data, query, filter, limit, true)
+}
+
+/// OR mode: entries matching ANY query term (not all).
+pub fn search_v2_or(
+    data: &[u8], query: &str, filter: &FilterPred, limit: usize,
+) -> Result<Vec<SearchHit>, String> {
+    search_v2_core(data, query, filter, limit, false)
+}
+
+fn search_v2_core(
+    data: &[u8], query: &str, filter: &FilterPred, limit: usize, require_all: bool,
+) -> Result<Vec<SearchHit>, String> {
     let hdr = read_header(data)?;
     let terms = crate::text::query_terms(query);
     if terms.is_empty() { return Err("empty query".into()); }
@@ -188,8 +201,9 @@ pub fn search_v2_filtered(
 
     for eid in 0..num_entries {
         if state.entry_gen[eid] != gen { continue; }
-        // AND mode: require all terms to have hit this entry
-        if state.hit_count[eid] < num_terms { continue; }
+        // AND mode: require all terms; OR mode: require at least one
+        let min_hits = if require_all { num_terms } else { 1 };
+        if state.hit_count[eid] < min_hits { continue; }
 
         let score = state.scores[eid];
         if score <= 0.0 { continue; }

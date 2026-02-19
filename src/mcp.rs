@@ -25,7 +25,6 @@ pub fn run(dir: &Path) -> Result<(), String> {
     let stdout = io::stdout();
 
     ensure_datalog(dir);
-    load_index(dir);
 
     if std::env::var("AMARANTHINE_REEXEC").is_ok() {
         std::env::remove_var("AMARANTHINE_REEXEC");
@@ -140,28 +139,45 @@ fn ensure_datalog(dir: &Path) {
             } else { let _ = crate::datalog::ensure_log(dir); }
         } else { let _ = crate::datalog::ensure_log(dir); }
     }
-    let _ = crate::inverted::rebuild(dir);
+    match crate::inverted::rebuild(dir) {
+        Ok((_, bytes)) => store_index(bytes),
+        Err(_) => {} // no index yet, load_index in run() will try disk
+    }
 }
 
 pub(crate) fn load_index(dir: &Path) {
     let index_path = dir.join("index.bin");
     if let Ok(data) = std::fs::read(&index_path) {
-        if let Ok(mut guard) = INDEX.lock() {
-            *guard = Some(ServerIndex { data });
-        }
+        store_index(data);
     }
+}
+
+pub(crate) fn store_index(data: Vec<u8>) {
+    if let Ok(mut guard) = INDEX.lock() {
+        *guard = Some(ServerIndex { data });
+    }
+}
+
+/// Borrow cached index data via closure. Returns None if no index loaded.
+pub(crate) fn with_index<F, R>(f: F) -> Option<R>
+where F: FnOnce(&[u8]) -> R {
+    INDEX.lock().ok().and_then(|guard| guard.as_ref().map(|idx| f(&idx.data)))
 }
 
 pub(crate) fn after_write(_dir: &Path, _topic: &str) {
     INDEX_DIRTY.store(true, Ordering::Release);
-    crate::cache::invalidate();
+    // Don't invalidate corpus cache here — let with_corpus() mtime check handle
+    // freshness. This allows rebuild() to reuse cached tokens on the next dispatch.
 }
 
 /// Rebuild index if dirty. Call before read operations.
+/// F1: Uses returned bytes directly instead of re-reading from disk.
 pub(crate) fn ensure_index_fresh(dir: &Path) {
     if INDEX_DIRTY.compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-        let _ = crate::inverted::rebuild(dir);
-        load_index(dir);
+        match crate::inverted::rebuild(dir) {
+            Ok((_, bytes)) => store_index(bytes),
+            Err(_) => load_index(dir), // fallback: existing index.bin
+        }
     }
 }
 
