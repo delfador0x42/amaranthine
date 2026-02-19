@@ -7,12 +7,14 @@ use crate::json::Value;
 use std::io::{self, BufRead, Write as _};
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 static SESSION_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 struct ServerIndex { data: Vec<u8> }
 
 static INDEX: Mutex<Option<ServerIndex>> = Mutex::new(None);
+static INDEX_DIRTY: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn log_session(msg: String) {
     if let Ok(mut log) = SESSION_LOG.lock() { log.push(msg); }
@@ -150,9 +152,17 @@ pub(crate) fn load_index(dir: &Path) {
     }
 }
 
-pub(crate) fn after_write(dir: &Path, _topic: &str) {
-    let _ = crate::inverted::rebuild(dir);
-    load_index(dir);
+pub(crate) fn after_write(_dir: &Path, _topic: &str) {
+    INDEX_DIRTY.store(true, Ordering::Release);
+    crate::cache::invalidate();
+}
+
+/// Rebuild index if dirty. Call before read operations.
+pub(crate) fn ensure_index_fresh(dir: &Path) {
+    if INDEX_DIRTY.compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+        let _ = crate::inverted::rebuild(dir);
+        load_index(dir);
+    }
 }
 
 fn init_result() -> Value {
@@ -163,7 +173,7 @@ fn init_result() -> Value {
         ])),
         ("serverInfo".into(), Value::Obj(vec![
             ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("5.0.0".into())),
+            ("version".into(), Value::Str("5.2.0".into())),
         ])),
     ])
 }

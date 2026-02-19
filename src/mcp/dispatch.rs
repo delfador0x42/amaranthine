@@ -2,6 +2,8 @@ use crate::json::Value;
 use std::path::Path;
 
 pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, String> {
+    // Deferred index rebuild: if a prior write marked dirty, rebuild now
+    super::ensure_index_fresh(dir);
     match name {
         "store" => {
             let topic = arg_str(args, "topic");
@@ -77,8 +79,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             }
             drop(_lock);
             if ok_count > 0 {
-                let _ = crate::inverted::rebuild(dir);
-                super::load_index(dir);
+                super::after_write(dir, "");
             }
             if verbose {
                 Ok(format!("batch: {ok_count}/{} stored\n{}", items.len(), results.join("\n")))
@@ -159,8 +160,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
         "delete_topic" => {
             let topic = arg_str(args, "topic");
             let result = crate::delete::run(dir, &topic, false, true, None)?;
-            let _ = crate::inverted::rebuild(dir);
-            super::load_index(dir);
+            super::after_write(dir, &topic);
             Ok(result)
         }
         "append_entry" => {
@@ -222,18 +222,14 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             } else {
                 crate::compact::run(dir, &topic, apply)
             }?;
-            if apply {
-                let _ = crate::inverted::rebuild(dir);
-                super::load_index(dir);
-            }
+            if apply { super::after_write(dir, ""); }
             Ok(result)
         }
         "export" => crate::export::export(dir),
         "import" => {
             let json = arg_str(args, "json");
             let result = crate::export::import(dir, &json)?;
-            let _ = crate::inverted::rebuild(dir);
-            super::load_index(dir);
+            super::after_write(dir, "");
             Ok(result)
         }
         "xref" => {
@@ -255,16 +251,14 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             let topic = arg_str(args, "topic");
             let new_name = arg_str(args, "new_name");
             let result = crate::edit::rename_topic(dir, &topic, &new_name)?;
-            let _ = crate::inverted::rebuild(dir);
-            super::load_index(dir);
+            super::after_write(dir, &new_name);
             Ok(result)
         }
         "merge_topics" => {
             let from = arg_str(args, "from");
             let into = arg_str(args, "into");
             let result = crate::edit::merge_topics(dir, &from, &into)?;
-            let _ = crate::inverted::rebuild(dir);
-            super::load_index(dir);
+            super::after_write(dir, &into);
             Ok(result)
         }
         "tag_entry" => {
@@ -338,8 +332,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
         }
         "compact_log" => {
             let result = crate::datalog::compact_log(dir)?;
-            let _ = crate::inverted::rebuild(dir);
-            super::load_index(dir);
+            super::after_write(dir, "");
             Ok(result)
         }
         "dep_graph" => crate::depgraph::run(dir),

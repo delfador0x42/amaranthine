@@ -1,7 +1,72 @@
-//! Query engine for the binary inverted index v2.
+//! Query engine for the binary inverted index v3.
 //! All reads are pointer arithmetic on a &[u8] slice.
+//! v3 adds: FilterPred, recency decay, confidence, tag bitmap, diversity cap.
 
+use std::sync::Mutex;
 use crate::format::*;
+
+// --- Filter predicate: nanosecond-speed pre-scoring filter ---
+
+pub struct FilterPred {
+    pub topic_id: Option<u16>,
+    pub after_days: u16,
+    pub before_days: u16,
+    pub tag_mask: u32,
+}
+
+impl FilterPred {
+    pub fn none() -> Self {
+        Self { topic_id: None, after_days: 0, before_days: u16::MAX, tag_mask: 0 }
+    }
+    fn passes(&self, m: &EntryMeta) -> bool {
+        if let Some(t) = self.topic_id { if { m.topic_id } != t { return false; } }
+        let ed = { m.epoch_days };
+        if ed < self.after_days { return false; }
+        if self.before_days < u16::MAX && ed > self.before_days { return false; }
+        if self.tag_mask != 0 && ({ m.tag_bitmap } & self.tag_mask) != self.tag_mask { return false; }
+        true
+    }
+}
+
+// --- QueryState: generation counter for buffer reuse ---
+
+pub struct QueryState {
+    generation: u32,
+    entry_gen: Vec<u32>,
+    scores: Vec<f64>,
+    hit_count: Vec<u16>,
+}
+
+impl QueryState {
+    pub fn new(num_entries: usize) -> Self {
+        Self {
+            generation: 0,
+            entry_gen: vec![0; num_entries],
+            scores: vec![0.0; num_entries],
+            hit_count: vec![0; num_entries],
+        }
+    }
+    fn ensure(&mut self, n: usize) {
+        if self.entry_gen.len() < n {
+            self.entry_gen.resize(n, 0);
+            self.scores.resize(n, 0.0);
+            self.hit_count.resize(n, 0);
+        }
+    }
+    fn advance(&mut self) -> u32 {
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 { self.generation = 1; }
+        self.generation
+    }
+}
+
+static QUERY_STATE: Mutex<QueryState> = Mutex::new(QueryState {
+    generation: 0, entry_gen: Vec::new(), scores: Vec::new(), hit_count: Vec::new(),
+});
+
+pub fn reset_query_state(num_entries: usize) {
+    if let Ok(mut g) = QUERY_STATE.lock() { *g = QueryState::new(num_entries); }
+}
 
 // --- Formatted search (MCP path) ---
 
@@ -30,6 +95,14 @@ pub struct SearchHit {
 }
 
 pub fn search_v2(data: &[u8], query: &str, limit: usize) -> Result<Vec<SearchHit>, String> {
+    search_v2_filtered(data, query, &FilterPred::none(), limit)
+}
+
+/// Full-featured search with pre-scoring filter, recency, confidence,
+/// insertion sort top-K, and diversity cap.
+pub fn search_v2_filtered(
+    data: &[u8], query: &str, filter: &FilterPred, limit: usize,
+) -> Result<Vec<SearchHit>, String> {
     let hdr = read_header(data)?;
     let terms = crate::text::query_terms(query);
     if terms.is_empty() { return Err("empty query".into()); }
@@ -41,10 +114,18 @@ pub fn search_v2(data: &[u8], query: &str, limit: usize) -> Result<Vec<SearchHit
     let meta_off = { hdr.meta_off } as usize;
     let snip_off = { hdr.snippet_off } as usize;
     let mask = table_cap - 1;
+    let num_terms = terms.len() as u16;
 
-    let mut scores = vec![0.0f64; num_entries];
-    let mut matched = vec![false; num_entries];
+    // Recency: compute today as epoch_days
+    let today_days = (crate::time::LocalTime::now().to_minutes() / 1440) as u16;
 
+    // Acquire QueryState with generation counter
+    let mut state_guard = QUERY_STATE.lock().map_err(|e| e.to_string())?;
+    state_guard.ensure(num_entries);
+    let gen = state_guard.advance();
+    let state = &mut *state_guard;
+
+    let mut any_hit = false;
     for term in &terms {
         let h = hash_term(term);
         let mut idx = (h as usize) & mask;
@@ -61,13 +142,36 @@ pub fn search_v2(data: &[u8], query: &str, limit: usize) -> Result<Vec<SearchHit
                     let eid = { p.entry_id } as usize;
                     if eid >= num_entries { continue; }
                     let m = read_at::<EntryMeta>(data, meta_off + eid * std::mem::size_of::<EntryMeta>())?;
+
+                    // Pre-scoring filter (2-3ns integer checks)
+                    if !filter.passes(&m) { continue; }
+
+                    // Generation counter: reset on first visit
+                    if state.entry_gen[eid] != gen {
+                        state.scores[eid] = 0.0;
+                        state.hit_count[eid] = 0;
+                        state.entry_gen[eid] = gen;
+                    }
+
+                    // BM25 scoring
                     let doc_len = { m.word_count } as f64;
                     let idf = { p.idf_x1000 } as f64 / 1000.0;
                     let tf = { p.tf } as f64;
                     let len_norm = 1.0 - 0.75 + 0.75 * doc_len / avgdl.max(1.0);
                     let tf_sat = (tf * 2.2) / (tf + 1.2 * len_norm);
-                    scores[eid] += idf * tf_sat;
-                    matched[eid] = true;
+
+                    // Confidence multiplier (255=1.0, 178=0.7)
+                    let conf = { m.confidence } as f64 / 255.0;
+
+                    // Recency decay: 1.0 / (1.0 + days_ago / 30.0)
+                    let ed = { m.epoch_days };
+                    let recency = if ed == 0 { 1.0 } else {
+                        1.0 / (1.0 + today_days.saturating_sub(ed) as f64 / 30.0)
+                    };
+
+                    state.scores[eid] += idf * tf_sat * conf * recency;
+                    state.hit_count[eid] += 1;
+                    any_hit = true;
                 }
                 break;
             }
@@ -75,29 +179,90 @@ pub fn search_v2(data: &[u8], query: &str, limit: usize) -> Result<Vec<SearchHit
         }
     }
 
-    let mut results: Vec<(usize, f64)> = scores.iter().enumerate()
-        .filter(|(i, _)| matched[*i]).map(|(i, s)| (i, *s)).collect();
-    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    results.truncate(limit);
+    if !any_hit { return Ok(Vec::new()); }
 
-    let mut hits = Vec::new();
-    for (eid, score) in results {
+    // Collect results: insertion sort top-K with diversity cap
+    let mut results: Vec<SearchHit> = Vec::with_capacity(limit);
+    let mut topic_counts = [0u8; 256]; // per-topic diversity counter
+    let diversity_cap: u8 = 3;
+
+    for eid in 0..num_entries {
+        if state.entry_gen[eid] != gen { continue; }
+        // AND mode: require all terms to have hit this entry
+        if state.hit_count[eid] < num_terms { continue; }
+
+        let score = state.scores[eid];
+        if score <= 0.0 { continue; }
+
         let m = read_at::<EntryMeta>(data, meta_off + eid * std::mem::size_of::<EntryMeta>())?;
+        let tid = { m.topic_id } as usize;
+
+        // Diversity cap: if topic already has `cap` results and we're full, require 1.5x min score
+        if results.len() >= limit && tid < topic_counts.len() && topic_counts[tid] >= diversity_cap {
+            let min_score = results.last().map(|r| r.score).unwrap_or(0.0);
+            if score <= min_score * 1.5 { continue; }
+        }
+
+        // Build snippet
         let s_off = snip_off + { m.snippet_off } as usize;
         let s_len = { m.snippet_len } as usize;
         let snippet = if s_off + s_len <= data.len() {
             std::str::from_utf8(&data[s_off..s_off + s_len]).unwrap_or("").to_string()
         } else { String::new() };
-        hits.push(SearchHit {
+
+        let hit = SearchHit {
             entry_id: eid as u32, topic_id: { m.topic_id }, score,
             snippet, date_minutes: { m.date_minutes },
             log_offset: { m.log_offset },
-        });
+        };
+
+        // Insertion sort into top-K
+        if results.len() < limit {
+            let pos = results.iter().position(|r| r.score < score).unwrap_or(results.len());
+            results.insert(pos, hit);
+            if tid < topic_counts.len() { topic_counts[tid] = topic_counts[tid].saturating_add(1); }
+        } else if score > results.last().map(|r| r.score).unwrap_or(0.0) {
+            let evicted = results.pop().unwrap();
+            let etid = evicted.topic_id as usize;
+            if etid < topic_counts.len() { topic_counts[etid] = topic_counts[etid].saturating_sub(1); }
+            let pos = results.iter().position(|r| r.score < score).unwrap_or(results.len());
+            results.insert(pos, hit);
+            if tid < topic_counts.len() { topic_counts[tid] = topic_counts[tid].saturating_add(1); }
+        }
     }
-    Ok(hits)
+    Ok(results)
 }
 
-// --- V2 section readers ---
+// --- Tag resolution ---
+
+/// Resolve tag name to bit position in tag_bitmap. Returns None if tag not in top-32.
+pub fn resolve_tag(data: &[u8], tag_name: &str) -> Option<u8> {
+    let hdr = read_header(data).ok()?;
+    let off = { hdr.tag_names_off } as usize;
+    if off >= data.len() { return None; }
+    let count = data[off] as usize;
+    let mut pos = off + 1;
+    let lower = tag_name.to_lowercase();
+    for bit in 0..count {
+        if pos >= data.len() { return None; }
+        let len = data[pos] as usize;
+        pos += 1;
+        if pos + len > data.len() { return None; }
+        if let Ok(name) = std::str::from_utf8(&data[pos..pos + len]) {
+            if name == lower { return Some(bit as u8); }
+        }
+        pos += len;
+    }
+    None
+}
+
+/// Resolve topic name to topic_id for FilterPred.
+pub fn resolve_topic(data: &[u8], topic_name: &str) -> Option<u16> {
+    let topics = topic_table(data).ok()?;
+    topics.iter().find(|(_, n, _)| n == topic_name).map(|(id, _, _)| *id)
+}
+
+// --- V3 section readers ---
 
 pub fn topic_table(data: &[u8]) -> Result<Vec<(u16, String, u16)>, String> {
     let hdr = read_header(data)?;
@@ -221,7 +386,8 @@ pub fn index_info(data: &[u8]) -> Result<String, String> {
     let tl = { hdr.total_len };
     let ntop = { hdr.num_topics };
     let nxr = { hdr.num_xrefs };
-    Ok(format!("index v2: {ne} entries, {nt} terms, {ntop} topics, {nxr} xrefs, table_cap={tc}, avgdl={ad:.1}, {tl} bytes"))
+    let ntags = { hdr.num_tags };
+    Ok(format!("index v3: {ne} entries, {nt} terms, {ntop} topics, {nxr} xrefs, {ntags} tags, table_cap={tc}, avgdl={ad:.1}, {tl} bytes"))
 }
 
 // --- Low-level readers (pub for cffi.rs) ---

@@ -5,6 +5,7 @@
 
 pub mod binquery;
 pub mod briefing;
+pub mod cache;
 pub mod cffi;
 pub mod compact;
 pub mod compress;

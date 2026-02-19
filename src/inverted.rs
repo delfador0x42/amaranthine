@@ -16,6 +16,7 @@ struct EntryInfo {
     source: String,
     log_offset: u32,
     text_lower: String,
+    tags: Vec<String>,
 }
 
 pub struct IndexBuilder {
@@ -23,11 +24,12 @@ pub struct IndexBuilder {
     entries: Vec<EntryInfo>,
     topics: Vec<String>,
     total_words: usize,
+    tag_freq: HashMap<String, usize>,
 }
 
 impl IndexBuilder {
     pub fn new() -> Self {
-        Self { terms: HashMap::new(), entries: Vec::new(), topics: Vec::new(), total_words: 0 }
+        Self { terms: HashMap::new(), entries: Vec::new(), topics: Vec::new(), total_words: 0, tag_freq: HashMap::new() }
     }
 
     pub fn add_topic(&mut self, name: &str) -> u16 {
@@ -41,7 +43,7 @@ impl IndexBuilder {
 
     pub fn add_entry(
         &mut self, topic_id: u16, text_lower: &str, snippet: String,
-        date_minutes: i32, source: String, log_offset: u32,
+        date_minutes: i32, source: String, log_offset: u32, tags: Vec<String>,
     ) -> u32 {
         let entry_id = self.entries.len() as u32;
         let tokens = crate::text::tokenize(text_lower);
@@ -56,10 +58,12 @@ impl IndexBuilder {
             self.terms.entry(term.to_string()).or_default().push((entry_id, tf));
         }
 
+        for tag in &tags { *self.tag_freq.entry(tag.clone()).or_insert(0) += 1; }
+
         self.entries.push(EntryInfo {
             topic_id, word_count: wc.min(u16::MAX as usize) as u16,
             snippet, date_minutes, source, log_offset,
-            text_lower: text_lower.to_string(),
+            text_lower: text_lower.to_string(), tags,
         });
         entry_id
     }
@@ -88,6 +92,9 @@ impl IndexBuilder {
         let num_terms = self.terms.len();
         let table_cap = (num_terms * 4 / 3 + 1).next_power_of_two().max(16);
         let mask = table_cap - 1;
+
+        // Tag bitmap: top 32 tags by frequency
+        let tag_to_bit = self.build_tag_map();
 
         // Posting lists
         let mut post_buf: Vec<Posting> = Vec::new();
@@ -137,12 +144,20 @@ impl IndexBuilder {
                 sources.extend_from_slice(&b[..l as usize]);
                 (o, l)
             };
+
+            let tag_bitmap = self.entry_tag_bitmap(&info.tags, &tag_to_bit);
+            let confidence = compute_confidence(&info.source, info.date_minutes);
+            let epoch_days = if info.date_minutes > 0 {
+                (info.date_minutes as u32 / 1440) as u16
+            } else { 0 };
+
             metas.push(EntryMeta {
                 topic_id: info.topic_id, word_count: info.word_count,
                 snippet_off: s_off, snippet_len: s_len,
                 date_minutes: info.date_minutes,
                 source_off: src_off, source_len: src_len,
                 log_offset: info.log_offset,
+                tag_bitmap, confidence, epoch_days, _pad: 0,
             });
         }
 
@@ -162,6 +177,9 @@ impl IndexBuilder {
         // Xrefs
         let xrefs = self.compute_xrefs();
 
+        // Tag names section: [count: u8][len: u8][name]...
+        let tag_names_buf = self.build_tag_names(&tag_to_bit);
+
         // Compute section offsets
         let hdr_sz = std::mem::size_of::<Header>();
         let tab_sz = table_cap * std::mem::size_of::<TermSlot>();
@@ -176,7 +194,8 @@ impl IndexBuilder {
         let src_off = tname_off + tname_pool.len();
         let xref_off = src_off + sources.len();
         let xref_sz = xrefs.len() * std::mem::size_of::<XrefEdge>();
-        let total = xref_off + xref_sz;
+        let tagn_off = xref_off + xref_sz;
+        let total = tagn_off + tag_names_buf.len();
 
         let header = Header {
             magic: MAGIC, version: VERSION,
@@ -187,7 +206,7 @@ impl IndexBuilder {
             snippet_off: snip_off as u32, topics_off: top_off as u32,
             topic_names_off: tname_off as u32, source_off: src_off as u32,
             xref_off: xref_off as u32, total_len: total as u32,
-            _reserved: [0; 2],
+            tag_names_off: tagn_off as u32, num_tags: tag_to_bit.len() as u32,
         };
 
         let mut buf = Vec::with_capacity(total);
@@ -200,6 +219,36 @@ impl IndexBuilder {
         buf.extend_from_slice(&tname_pool);
         buf.extend_from_slice(&sources);
         for x in &xrefs { buf.extend_from_slice(as_bytes(x)); }
+        buf.extend_from_slice(&tag_names_buf);
+        buf
+    }
+
+    fn build_tag_map(&self) -> Vec<(String, u8)> {
+        let mut sorted: Vec<_> = self.tag_freq.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1));
+        sorted.iter().take(32)
+            .enumerate().map(|(i, (name, _))| ((*name).clone(), i as u8)).collect()
+    }
+
+    fn entry_tag_bitmap(&self, tags: &[String], tag_map: &[(String, u8)]) -> u32 {
+        let mut bitmap = 0u32;
+        for tag in tags {
+            if let Some((_, bit)) = tag_map.iter().find(|(n, _)| n == tag) {
+                bitmap |= 1u32 << *bit;
+            }
+        }
+        bitmap
+    }
+
+    fn build_tag_names(&self, tag_map: &[(String, u8)]) -> Vec<u8> {
+        let mut buf = vec![tag_map.len() as u8];
+        let mut sorted: Vec<_> = tag_map.to_vec();
+        sorted.sort_by_key(|(_, bit)| *bit);
+        for (name, _) in &sorted {
+            let b = name.as_bytes();
+            buf.push(b.len().min(255) as u8);
+            buf.extend_from_slice(&b[..b.len().min(255)]);
+        }
         buf
     }
 }
@@ -227,8 +276,9 @@ pub fn rebuild(dir: &Path) -> Result<String, String> {
         let tid = builder.add_topic(&e.topic);
         let text_lower = e.body.to_lowercase();
         let source = crate::text::extract_source(&e.body).unwrap_or_default();
+        let tags = extract_entry_tags(&e.body);
         let snippet = build_snippet(&e.topic, e.timestamp_min, &e.body);
-        builder.add_entry(tid, &text_lower, snippet, e.timestamp_min, source, e.offset);
+        builder.add_entry(tid, &text_lower, snippet, e.timestamp_min, source, e.offset, tags);
     }
 
     let bytes = builder.build();
@@ -240,6 +290,25 @@ pub fn rebuild(dir: &Path) -> Result<String, String> {
     let ntop = builder.topics.len();
     Ok(format!("index v2: {ne} entries, {nt} terms, {ntop} topics, {} bytes",
         bytes.len()))
+}
+
+fn extract_entry_tags(body: &str) -> Vec<String> {
+    body.lines()
+        .find_map(|l| l.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')))
+        .map(|inner| inner.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+fn compute_confidence(source: &str, date_minutes: i32) -> u8 {
+    if source.is_empty() { return 255; }
+    let path = source.split(':').next().unwrap_or(source);
+    let file_mtime = match std::fs::metadata(path).and_then(|m| m.modified()) {
+        Ok(t) => t,
+        Err(_) => return 255,
+    };
+    let entry_secs = (date_minutes as u64) * 60;
+    let entry_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(entry_secs);
+    if file_mtime > entry_time { 178 } else { 255 }
 }
 
 fn build_snippet(topic: &str, ts_min: i32, body: &str) -> String {

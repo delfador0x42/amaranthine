@@ -26,6 +26,10 @@ impl QueryState {
     }
 }
 
+fn today_epoch_days() -> u16 {
+    (crate::time::LocalTime::now().to_minutes() / 1440) as u16
+}
+
 pub fn search_raw(
     data: &[u8], hashes: &[u64], state: &mut QueryState, out: &mut [RawResult],
 ) -> Result<usize, String> {
@@ -41,6 +45,7 @@ pub fn search_raw(
     state.generation = state.generation.wrapping_add(1);
     if state.generation == 0 { state.generation = 1; }
     let gen = state.generation;
+    let today = today_epoch_days();
 
     let mut any_hit = false;
     for &h in hashes {
@@ -68,7 +73,12 @@ pub fn search_raw(
                     let tf = { p.tf } as f64;
                     let len_norm = 1.0 - 0.75 + 0.75 * doc_len / avgdl.max(1.0);
                     let tf_sat = (tf * 2.2) / (tf + 1.2 * len_norm);
-                    state.scores[eid] += idf * tf_sat;
+                    let conf = { m.confidence } as f64 / 255.0;
+                    let ed = { m.epoch_days };
+                    let recency = if ed == 0 { 1.0 } else {
+                        1.0 / (1.0 + today.saturating_sub(ed) as f64 / 30.0)
+                    };
+                    state.scores[eid] += idf * tf_sat * conf * recency;
                 }
                 break;
             }

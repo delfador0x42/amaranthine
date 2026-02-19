@@ -2,7 +2,7 @@
 //! All structs are repr(C, packed) for zero-copy access via pointer arithmetic.
 
 pub const MAGIC: [u8; 4] = [b'A', b'M', b'R', b'N'];
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
@@ -23,7 +23,8 @@ pub struct Header {
     pub source_off: u32,
     pub xref_off: u32,
     pub total_len: u32,
-    pub _reserved: [u32; 2],
+    pub tag_names_off: u32,
+    pub num_tags: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -54,6 +55,10 @@ pub struct EntryMeta {
     pub source_off: u32,
     pub source_len: u16,
     pub log_offset: u32,
+    pub tag_bitmap: u32,
+    pub confidence: u8,
+    pub epoch_days: u16,
+    pub _pad: u8,
 }
 
 #[derive(Clone, Copy)]
