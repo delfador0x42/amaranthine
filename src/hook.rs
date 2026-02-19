@@ -49,10 +49,22 @@ fn ambient(input: &Value, dir: &Path) -> Result<String, String> {
         Err(_) => return Ok(String::new()),
     };
     let results = crate::binquery::search(&data, stem, 5).unwrap_or_default();
-    if results.is_empty() || results.starts_with("0 match") {
-        return Ok(String::new());
+    let has_results = !results.is_empty() && !results.starts_with("0 match");
+
+    // Also surface structural coupling entries that reference this file
+    let structural_query = format!("structural {stem}");
+    let structural = crate::binquery::search(&data, &structural_query, 3).unwrap_or_default();
+    let has_structural = !structural.is_empty() && !structural.starts_with("0 match");
+
+    if !has_results && !has_structural { return Ok(String::new()); }
+
+    let mut out = String::new();
+    if has_results { out.push_str(&format!("amaranthine entries for {stem}:\n{results}")); }
+    if has_structural {
+        if has_results { out.push_str("\n---\n"); }
+        out.push_str(&format!("structural coupling:\n{structural}"));
     }
-    Ok(hook_output(&format!("amaranthine entries for {stem}:\n{results}")))
+    Ok(hook_output(&out))
 }
 
 /// PostToolUse(Bash): after build commands, remind to store results.

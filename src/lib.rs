@@ -7,6 +7,7 @@ pub mod binquery;
 pub mod briefing;
 pub mod cache;
 pub mod cffi;
+pub mod codepath;
 pub mod compact;
 pub mod compress;
 pub mod config;

@@ -93,9 +93,13 @@ pub fn resolve_source(source: &str) -> Option<PathBuf> {
     None
 }
 
-/// Check if a source file is newer than the entry timestamp.
+/// Check if a source file (or glob pattern) is newer than the entry timestamp.
+/// Handles both single files (`src/cache.rs:42`) and globs (`src/**/*.rs`).
 pub fn check_staleness(source: &str, entry_header: &str) -> Option<String> {
     let entry_secs = crate::time::parse_date_minutes(entry_header)? * 60;
+    if source.contains('*') {
+        return check_staleness_glob(source, entry_secs);
+    }
     let resolved = resolve_source(source)?;
     let mtime = fs::metadata(&resolved).ok()?.modified().ok()?;
     let file_secs = mtime.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
@@ -103,6 +107,62 @@ pub fn check_staleness(source: &str, entry_header: &str) -> Option<String> {
         Some("STALE (source modified after entry)".into())
     } else {
         None
+    }
+}
+
+/// Check if any file matching a glob pattern is newer than entry_secs.
+/// Supports `dir/**/*.ext` patterns: extracts root dir and suffix, walks recursively.
+fn check_staleness_glob(pattern: &str, entry_secs: i64) -> Option<String> {
+    // Parse "path/to/dir/**/*.rs" → root="path/to/dir", suffix=".rs"
+    let (root, suffix) = parse_glob_pattern(pattern)?;
+    let root_path = resolve_source(&root).or_else(|| {
+        let p = PathBuf::from(&root);
+        if p.is_dir() { Some(p) } else { None }
+    })?;
+    let mut stale_count = 0usize;
+    count_stale_files(&root_path, &suffix, entry_secs, &mut stale_count);
+    if stale_count > 0 {
+        Some(format!("STALE ({stale_count} files modified after entry)"))
+    } else {
+        None
+    }
+}
+
+/// Extract root directory and file suffix from a glob pattern.
+/// "src/**/*.rs" → Some(("src", ".rs"))
+/// "src/*.rs"    → Some(("src", ".rs"))
+fn parse_glob_pattern(pattern: &str) -> Option<(String, String)> {
+    // Find the first '*' and work backwards to the last '/'
+    let star_pos = pattern.find('*')?;
+    let root = if star_pos > 0 {
+        let prefix = &pattern[..star_pos];
+        prefix.trim_end_matches('/').to_string()
+    } else {
+        ".".to_string()
+    };
+    // Extract suffix from the part after the last '*'
+    let after_star = &pattern[pattern.rfind('*').unwrap_or(star_pos)..];
+    let suffix = after_star.trim_start_matches('*').to_string();
+    if suffix.is_empty() { return Some((root, String::new())); }
+    Some((root, suffix))
+}
+
+fn count_stale_files(dir: &Path, suffix: &str, entry_secs: i64, count: &mut usize) {
+    let entries = match fs::read_dir(dir) { Ok(e) => e, Err(_) => return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !name.starts_with('.') { count_stale_files(&path, suffix, entry_secs, count); }
+        } else if suffix.is_empty() || path.to_string_lossy().ends_with(suffix) {
+            if let Ok(meta) = fs::metadata(&path) {
+                if let Ok(mtime) = meta.modified() {
+                    let secs = mtime.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64).unwrap_or(0);
+                    if secs > entry_secs { *count += 1; }
+                }
+            }
+        }
     }
 }
 

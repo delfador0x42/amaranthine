@@ -1,4 +1,4 @@
-use amaranthine::{config, search, store, context, delete, edit,
+use amaranthine::{codepath, config, search, store, context, delete, edit,
     topics, prune, digest, stats, compact, export, xref, migrate, mcp,
     hook, install, time, json};
 use std::env;
@@ -165,6 +165,25 @@ fn main() {
         Some("import") => Err("usage: import <file>".into()),
         Some("xref") if cmd.len() >= 2 => xref::refs_for(&dir, &cmd[1]),
         Some("xref") => Err("usage: xref <topic>".into()),
+        Some("codepath") if cmd.len() >= 3 => {
+            let glob = parse_flag_str(cmd, "--glob").unwrap_or_else(|| "*.rs".into());
+            let ctx: usize = parse_flag_value(cmd, "--context").unwrap_or(2);
+            let store_topic = parse_flag_str(cmd, "--store");
+            match codepath::run(&cmd[1], std::path::Path::new(&cmd[2]), &glob, ctx) {
+                Ok(result) => {
+                    if let Some(ref topic) = store_topic {
+                        let source = format!("{}/**/{}", &cmd[2], glob);
+                        if let Err(e) = store::run_full(&dir, topic, &result, Some("structural,coupling"), true, Some(&source)) {
+                            return eprintln!("stored codepath but store failed: {e}");
+                        }
+                        eprintln!("stored under topic: {topic}");
+                    }
+                    Ok(result)
+                }
+                Err(e) => Err(e),
+            }
+        }
+        Some("codepath") => Err("usage: codepath <pattern> <path> [--glob *.rs] [--context 2] [--store <topic>]".into()),
         Some("migrate") => {
             let apply = cmd.iter().any(|a| a == "--apply");
             migrate::run(&dir, apply)
@@ -246,6 +265,10 @@ fn print_help() {
         "  import <file|->              Import topics from JSON\n",
         "  xref <topic>                 Find cross-references in other topics\n",
         "  migrate [--apply]            Find/fix entries without timestamps\n",
+        "  codepath <pat> <dir> [FLAGS] Search codebase, categorize access patterns\n",
+        "    --glob SUFFIX              File filter (default: *.rs)\n",
+        "    --context N                Lines of context (default: 2)\n",
+        "    --store TOPIC              Store results under an amaranthine topic\n",
         "  digest                       Compact summary for MEMORY.md\n",
         "  call <tool> [key=value ...]  Call an MCP tool directly (for testing)\n",
         "  serve                        MCP server over stdio\n",

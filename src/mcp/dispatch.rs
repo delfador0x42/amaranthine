@@ -362,6 +362,23 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             super::after_write(dir, "");
             Ok(result)
         }
+        "codepath" => {
+            let pattern = arg_str(args, "pattern");
+            let path_str = arg_str(args, "path");
+            let glob = arg_str(args, "glob");
+            let glob = if glob.is_empty() { "*.rs" } else { glob.as_str() };
+            let ctx = arg_str(args, "context").parse::<usize>().unwrap_or(2);
+            let result = crate::codepath::run(&pattern, std::path::Path::new(&path_str), glob, ctx)?;
+            let store_topic = arg_str(args, "store_topic");
+            if !store_topic.is_empty() {
+                let tags = arg_str(args, "tags");
+                let tags = if tags.is_empty() { "structural,coupling" } else { tags.as_str() };
+                let source = format!("{}/**/{}", path_str, glob);
+                crate::store::run_full(dir, &store_topic, &result, Some(tags), true, Some(&source))?;
+                super::after_write(dir, &store_topic);
+            }
+            Ok(result)
+        }
         "dep_graph" => crate::depgraph::run(dir),
         "check_stale" => crate::stats::check_stale(dir),
         "refresh_stale" => crate::stats::refresh_stale(dir),
