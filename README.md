@@ -111,3 +111,4 @@ Search uses BM25 with CamelCase/snake_case splitting, topic-name boost, tag-awar
 - Three access tiers: C FFI (~200ns), MCP server (~5ms), corpus cache (~0us warm)
 - See [DESIGN.md](DESIGN.md) for architecture details
 - See [CONTRIBUTING.md](CONTRIBUTING.md) for development guide
+- See [prompts/knowledge-seed.md](prompts/knowledge-seed.md) for the deep knowledge seeding prompt
