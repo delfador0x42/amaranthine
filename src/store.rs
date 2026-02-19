@@ -4,16 +4,16 @@ use std::io::{self, Read};
 use std::path::Path;
 
 pub fn run(dir: &Path, topic: &str, text: &str) -> Result<String, String> {
-    run_full(dir, topic, text, None, false)
+    run_full(dir, topic, text, None, false, None)
 }
 
 pub fn run_with_tags(dir: &Path, topic: &str, text: &str, tags: Option<&str>) -> Result<String, String> {
-    run_full(dir, topic, text, tags, false)
+    run_full(dir, topic, text, tags, false, None)
 }
 
 /// Lean write for batch_store — no lock, no dupe check, no tag suggestions.
 /// Caller must hold FileLock and do its own dedup.
-pub fn run_batch_entry(dir: &Path, topic: &str, text: &str, tags: Option<&str>) -> Result<String, String> {
+pub fn run_batch_entry(dir: &Path, topic: &str, text: &str, tags: Option<&str>, source: Option<&str>) -> Result<String, String> {
     crate::config::ensure_dir(dir)?;
     let filename = crate::config::sanitize_topic(topic);
     let filepath = dir.join(format!("{filename}.md"));
@@ -30,6 +30,9 @@ pub fn run_batch_entry(dir: &Path, topic: &str, text: &str, tags: Option<&str>) 
     if let Some(ref t) = cleaned_tags {
         if !t.is_empty() { content.push_str(&format!("[tags: {t}]\n")); }
     }
+    if let Some(src) = source {
+        content.push_str(&format!("[source: {src}]\n"));
+    }
     content.push_str(&format!("{text}\n\n"));
     crate::config::atomic_write(&filepath, &content)?;
 
@@ -37,7 +40,7 @@ pub fn run_batch_entry(dir: &Path, topic: &str, text: &str, tags: Option<&str>) 
     Ok(format!("stored in {filename}.md ({count} entries)"))
 }
 
-pub fn run_full(dir: &Path, topic: &str, text: &str, tags: Option<&str>, force: bool) -> Result<String, String> {
+pub fn run_full(dir: &Path, topic: &str, text: &str, tags: Option<&str>, force: bool, source: Option<&str>) -> Result<String, String> {
     crate::config::ensure_dir(dir)?;
     let _lock = crate::lock::FileLock::acquire(dir)?;
     let text = read_text(text)?;
@@ -70,6 +73,9 @@ pub fn run_full(dir: &Path, topic: &str, text: &str, tags: Option<&str>, force: 
         if !tags.is_empty() {
             content.push_str(&format!("[tags: {tags}]\n"));
         }
+    }
+    if let Some(src) = source {
+        content.push_str(&format!("[source: {src}]\n"));
     }
     content.push_str(&format!("{text}\n\n"));
 

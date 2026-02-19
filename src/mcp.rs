@@ -143,7 +143,7 @@ fn init_result() -> Value {
         ])),
         ("serverInfo".into(), Value::Obj(vec![
             ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("2.0.0".into())),
+            ("version".into(), Value::Str("3.4.0".into())),
         ])),
     ])
 }
@@ -212,6 +212,10 @@ fn batch_store_tool() -> Value {
                 ("type".into(), Value::Str("string".into())),
                 ("description".into(), Value::Str("Comma-separated tags".into())),
             ])),
+            ("source".into(), Value::Obj(vec![
+                ("type".into(), Value::Str("string".into())),
+                ("description".into(), Value::Str("Source file: path/to/file:line for staleness detection".into())),
+            ])),
         ])),
         ("required".into(), Value::Arr(vec![
             Value::Str("topic".into()), Value::Str("text".into()),
@@ -274,6 +278,7 @@ fn tool_list() -> Value {
               ("text", "string", "Entry content"),
               ("tags", "string", "Comma-separated tags (e.g. 'bug,p0,iris')"),
               ("force", "string", "Set to 'true' to bypass duplicate detection"),
+              ("source", "string", "Source file reference: 'path/to/file:line'. Enables staleness detection."),
               ("terse", "string", "Set to 'true' for minimal response (just first line)")]),
         tool("append", "Add text to the last entry in a topic (no new timestamp). Use when adding related info to a recent entry.",
             &["topic", "text"],
@@ -377,6 +382,17 @@ fn tool_list() -> Value {
               ("limit", "string", "Max results (default: 10)")]),
         tool("session", "Show what was stored this session. Tracks all store/batch_store calls since server started.",
             &[], &[]),
+        tool("search_entity", "Search across all topics, results grouped by topic. Shows the full picture per-topic instead of flat BM25 ranking.",
+            &["query"],
+            &[("query", "string", "Search query"),
+              ("limit", "string", "Max results per topic (default: 5)")]),
+        tool("reconstruct", "Architecture query: read all topics matching a keyword fully, then search other topics for related entries.",
+            &["query"],
+            &[("query", "string", "Module or component name to reconstruct (e.g. 'endpoint', 'engine')")]),
+        tool("dep_graph", "Topic dependency graph: which topics reference which. Shows bidirectional edges sorted by connectivity.",
+            &[], &[]),
+        tool("check_stale", "Scan all entries with [source:] metadata and report which source files have been modified since the entry was written.",
+            &[], &[]),
         tool("_reload", "Re-exec the server binary to pick up code changes. Sends tools/list_changed notification after reload.",
             &[], &[]),
     ])
@@ -471,7 +487,9 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             let tags = if tags.is_empty() { None } else { Some(tags.as_str()) };
             let force = arg_bool(args, "force");
             let terse = arg_bool(args, "terse");
-            let result = crate::store::run_full(dir, &topic, &text, tags, force)?;
+            let source = arg_str(args, "source");
+            let source = if source.is_empty() { None } else { Some(source.as_str()) };
+            let result = crate::store::run_full(dir, &topic, &text, tags, force, source)?;
             after_write(dir, &topic);
             log_session(format!("[{}] {}", topic,
                 result.lines().next().unwrap_or("stored")));
@@ -508,6 +526,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
                 let topic = item.get("topic").and_then(|v| v.as_str()).unwrap_or("");
                 let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 let tags = item.get("tags").and_then(|v| v.as_str());
+                let source = item.get("source").and_then(|v| v.as_str());
                 if topic.is_empty() || text.is_empty() {
                     results.push(format!("  [{}] skipped: missing topic or text", i + 1));
                     continue;
@@ -521,7 +540,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
                     continue;
                 }
                 seen.push(key);
-                match crate::store::run_batch_entry(dir, topic, text, tags) {
+                match crate::store::run_batch_entry(dir, topic, text, tags, source) {
                     Ok(msg) => {
                         ok_count += 1;
                         let f = crate::config::sanitize_topic(topic);
@@ -792,6 +811,18 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
                 Ok(out)
             }
         }
+        "search_entity" => {
+            let query = arg_str(args, "query");
+            let limit = arg_str(args, "limit").parse::<usize>().ok();
+            let filter = build_filter(args);
+            crate::search::run_grouped(dir, &query, limit, &filter)
+        }
+        "reconstruct" => {
+            let query = arg_str(args, "query");
+            crate::reconstruct::run(dir, &query)
+        }
+        "dep_graph" => crate::depgraph::run(dir),
+        "check_stale" => check_stale(dir),
         _ => Err(format!("unknown tool: {name}")),
     }
 }
@@ -810,4 +841,33 @@ fn arg_str(args: Option<&Value>, key: &str) -> String {
 fn arg_bool(args: Option<&Value>, key: &str) -> bool {
     let s = arg_str(args, key);
     s == "true" || s == "1"
+}
+
+/// Scan all entries with [source:] metadata, report staleness.
+fn check_stale(dir: &Path) -> Result<String, String> {
+    let files = crate::config::list_search_files(dir)?;
+    let mut stale = Vec::new();
+    let mut checked = 0usize;
+    for path in &files {
+        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        for section in crate::search::parse_sections(&content) {
+            if let Some((ref src_path, _)) = crate::config::parse_source(&section) {
+                checked += 1;
+                let ts = section.first().map(|h| h.trim_start_matches("## ")).unwrap_or("");
+                if let Some(msg) = crate::config::check_staleness(src_path, ts) {
+                    let preview = section.iter().skip(1)
+                        .find(|l| !l.starts_with('[') && !l.trim().is_empty())
+                        .map(|l| l.trim()).unwrap_or("");
+                    let short = if preview.len() > 60 { &preview[..60] } else { preview };
+                    stale.push(format!("  [{name}] {ts}: {msg}\n    {short}"));
+                }
+            }
+        }
+    }
+    if stale.is_empty() {
+        Ok(format!("checked {checked} sourced entries: all fresh"))
+    } else {
+        Ok(format!("{} stale of {checked} sourced entries:\n{}", stale.len(), stale.join("\n")))
+    }
 }

@@ -177,6 +177,69 @@ pub fn count(dir: &Path, query: &str, filter: &Filter) -> Result<String, String>
     })
 }
 
+/// Grouped search: results organized by topic, not flat BM25 rank.
+pub fn run_grouped(dir: &Path, query: &str, limit_per_topic: Option<usize>, filter: &Filter) -> Result<String, String> {
+    if !dir.exists() {
+        return Err(format!("{} not found", dir.display()));
+    }
+    let terms = query_terms(query);
+    if terms.is_empty() {
+        return Err("query required for entity search".into());
+    }
+    let files = search_files(dir, filter)?;
+    let cap = limit_per_topic.unwrap_or(5);
+
+    let (results, fallback) = crate::cache::with_corpus(&files, |groups| {
+        let corpus = build_corpus(groups, filter);
+        score_corpus(&corpus, &terms, filter.mode)
+    });
+
+    if results.is_empty() {
+        return Ok(no_match_message(query, filter, dir));
+    }
+
+    // Group by topic, preserving BM25 sort within each group
+    let mut groups: std::collections::BTreeMap<String, Vec<&ScoredResult>> =
+        std::collections::BTreeMap::new();
+    for r in &results {
+        groups.entry(r.name.clone()).or_default().push(r);
+    }
+
+    // Sort topics by best score in each group
+    let mut topic_order: Vec<(String, f64)> = groups.iter()
+        .map(|(name, entries)| (name.clone(), entries.first().map(|e| e.score).unwrap_or(0.0)))
+        .collect();
+    topic_order.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut out = String::new();
+    if fallback {
+        let _ = writeln!(out, "(no exact match — showing OR results)");
+    }
+    let total: usize = groups.values().map(|v| v.len()).sum();
+    let _ = writeln!(out, "'{}' across {} topics ({} matches):\n", query, groups.len(), total);
+
+    for (name, _) in &topic_order {
+        let entries = &groups[name];
+        let _ = writeln!(out, "[{}] {} matches", name, entries.len());
+        for r in entries.iter().take(cap) {
+            let header = r.section.first().map(|s| s.as_str()).unwrap_or("??");
+            let _ = write!(out, "  {} — ", header.trim_start_matches("## "));
+            // First non-metadata content line
+            if let Some(line) = r.section.iter().skip(1)
+                .find(|l| !l.starts_with("[tags:") && !l.starts_with("[source:") && !l.starts_with("[type:") && !l.trim().is_empty()) {
+                let _ = writeln!(out, "{}", truncate(line.trim(), 90));
+            } else {
+                let _ = writeln!(out);
+            }
+        }
+        if entries.len() > cap {
+            let _ = writeln!(out, "  ...and {} more", entries.len() - cap);
+        }
+        let _ = writeln!(out);
+    }
+    Ok(out)
+}
+
 /// BM25 parameters (Okapi BM25 standard values)
 const BM25_K1: f64 = 1.2;
 const BM25_B: f64 = 0.75;

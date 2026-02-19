@@ -53,7 +53,7 @@ fn main() {
                 })
                 .map(|s| s.as_str()).collect();
             let text = text_parts.join(" ");
-            store::run_full(&dir, &cmd[1], &text, tags.as_deref(), force)
+            store::run_full(&dir, &cmd[1], &text, tags.as_deref(), force, None)
         }
         Some("store") if cmd.len() == 2 => store::run(&dir, &cmd[1], "-"),
         Some("store") => Err("usage: store <topic> <text|-> [--tags t1,t2]".into()),

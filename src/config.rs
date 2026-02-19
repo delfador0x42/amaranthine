@@ -63,6 +63,34 @@ pub fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Parse [source: path/to/file:line] from entry lines.
+pub fn parse_source(lines: &[&str]) -> Option<(String, Option<usize>)> {
+    for line in lines {
+        if let Some(inner) = line.strip_prefix("[source: ").and_then(|s| s.strip_suffix(']')) {
+            let inner = inner.trim();
+            if let Some((path, line_num)) = inner.rsplit_once(':') {
+                if let Ok(n) = line_num.parse::<usize>() {
+                    return Some((path.to_string(), Some(n)));
+                }
+            }
+            return Some((inner.to_string(), None));
+        }
+    }
+    None
+}
+
+/// Check if a source file is newer than the entry timestamp.
+pub fn check_staleness(source: &str, entry_header: &str) -> Option<String> {
+    let entry_secs = crate::time::parse_date_minutes(entry_header)? * 60;
+    let mtime = fs::metadata(source).ok()?.modified().ok()?;
+    let file_secs = mtime.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+    if file_secs > entry_secs {
+        Some("STALE (source modified after entry)".into())
+    } else {
+        None
+    }
+}
+
 fn list_md_files(dir: &Path, exclude: &[&str]) -> Result<Vec<PathBuf>, String> {
     let entries = fs::read_dir(dir).map_err(|e| e.to_string())?;
     let mut files: Vec<PathBuf> = entries
