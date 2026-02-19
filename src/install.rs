@@ -118,12 +118,14 @@ fn update_claude_md(path: &Path) -> Result<(), String> {
         "Cross-session knowledge store via MCP tools (prefixed `amaranthine__`).\n\n",
         "**Every session:** `search(query)` before starting work.\n",
         "**During work:** `store(topic, text, tags?)` for non-obvious findings.\n\n",
-        "**Search tools:** `search` (full) | `search_medium` (2-line preview) | ",
+        "**Search:** `search` (full) | `search_medium` (2-line) | ",
         "`search_brief` (1-line) | `search_topics` | `search_count`\n",
-        "**Write tools:** `store` | `batch_store` | `append` | ",
+        "**Write:** `store` | `batch_store` | `append` | ",
         "`append_entry` | `update_entry` | `delete_entry`\n",
-        "**Browse tools:** `context` | `topics` | `recent` | ",
+        "**Browse:** `context` | `topics` | `recent` | ",
         "`read_topic` | `digest` | `stats` | `list_tags`\n",
+        "**Analysis:** `reconstruct` (one-shot semantic synthesis) | ",
+        "`search_entity` | `dep_graph` | `check_stale` | `xref`\n",
     );
 
     fs::write(path, format!("{content}{section}")).map_err(|e| e.to_string())?;

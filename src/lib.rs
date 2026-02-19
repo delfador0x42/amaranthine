@@ -4,16 +4,19 @@
 //! C/FFI: links libamaranthine.dylib, queries index at ~200ns
 
 pub mod binquery;
-pub mod cache;
+pub mod briefing;
+pub mod cffi;
 pub mod compact;
+pub mod compress;
 pub mod config;
 pub mod context;
+pub mod datalog;
 pub mod depgraph;
 pub mod delete;
 pub mod digest;
 pub mod edit;
 pub mod export;
-pub mod index;
+pub mod format;
 pub mod install;
 pub mod inverted;
 pub mod json;
@@ -25,6 +28,7 @@ pub mod reconstruct;
 pub mod search;
 pub mod stats;
 pub mod store;
+pub mod text;
 pub mod time;
 pub mod topics;
 pub mod xref;
@@ -39,11 +43,11 @@ pub struct AmrIndex {
     data: Vec<u8>,
     path: String,
     mtime: SystemTime,
-    state: binquery::QueryState,
+    state: cffi::QueryState,
 }
 
 /// C-compatible result from zero-alloc search.
-pub use binquery::RawResult as AmrResult;
+pub use cffi::RawResult as AmrResult;
 
 /// Open an index file, load into memory. Returns null on failure.
 #[no_mangle]
@@ -61,7 +65,7 @@ pub extern "C" fn amr_open(path: *const c_char) -> *mut AmrIndex {
         .and_then(|m| m.modified())
         .unwrap_or(SystemTime::UNIX_EPOCH);
     let num_entries = binquery::entry_count(&data).unwrap_or(0);
-    let state = binquery::QueryState::new(num_entries);
+    let state = cffi::QueryState::new(num_entries);
     Box::into_raw(Box::new(AmrIndex { data, path: path_str.into(), mtime, state }))
 }
 
@@ -115,7 +119,7 @@ pub extern "C" fn amr_reload(idx: *mut AmrIndex) -> i32 {
                 .and_then(|m| m.modified())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             let n = binquery::entry_count(&data).unwrap_or(0);
-            h.state = binquery::QueryState::new(n);
+            h.state = cffi::QueryState::new(n);
             h.data = data;
             0
         }
@@ -145,7 +149,7 @@ pub extern "C" fn amr_hash(term: *const c_char) -> u64 {
         Ok(s) => s,
         Err(_) => return 0,
     };
-    inverted::hash_term(&s.to_lowercase())
+    format::hash_term(&s.to_lowercase())
 }
 
 /// Zero-alloc search with pre-hashed terms. Writes into caller's buffer.
@@ -159,18 +163,18 @@ pub extern "C" fn amr_search_raw(
     let h = unsafe { &mut *idx };
     let hash_slice = unsafe { std::slice::from_raw_parts(hashes, nhashes as usize) };
     let out_slice = unsafe { std::slice::from_raw_parts_mut(out, limit as usize) };
-    binquery::search_raw(&h.data, hash_slice, &mut h.state, out_slice).unwrap_or(0) as u32
+    cffi::search_raw(&h.data, hash_slice, &mut h.state, out_slice).unwrap_or(0) as u32
 }
 
 /// Get snippet for an entry_id. Returns pointer + length into index data.
 /// Valid until amr_reload or amr_close. Do NOT free the pointer.
 #[no_mangle]
 pub extern "C" fn amr_snippet(
-    idx: *const AmrIndex, entry_id: u16, out_len: *mut u32,
+    idx: *const AmrIndex, entry_id: u32, out_len: *mut u32,
 ) -> *const u8 {
     if idx.is_null() { return std::ptr::null(); }
     let h = unsafe { &*idx };
-    match binquery::snippet(&h.data, entry_id) {
+    match cffi::snippet_u32(&h.data, entry_id) {
         Some(s) => {
             if !out_len.is_null() { unsafe { *out_len = s.len() as u32; } }
             s.as_ptr()

@@ -1,9 +1,8 @@
 use std::fmt::Write;
-use std::fs;
 use std::path::Path;
-use crate::cache::CachedEntry;
+use crate::text::{query_terms, tokenize, truncate, extract_tags};
 
-/// Filter options for search (date range + tag + topic scope + mode)
+/// Filter options for search (date range + tag + topic scope + mode).
 pub struct Filter {
     pub after: Option<i64>,  // days since epoch
     pub before: Option<i64>,
@@ -20,605 +19,289 @@ impl Filter {
     pub fn is_active(&self) -> bool { self.after.is_some() || self.before.is_some() || self.tag.is_some() || self.topic.is_some() }
 }
 
-/// Resolve search files — limit to one topic if filter.topic is set.
-pub fn search_files(dir: &Path, filter: &Filter) -> Result<Vec<std::path::PathBuf>, String> {
-    if let Some(ref topic) = filter.topic {
-        let f = crate::config::sanitize_topic(topic);
-        let p = dir.join(format!("{f}.md"));
-        if p.exists() { Ok(vec![p]) } else { Err(format!("topic '{topic}' not found")) }
-    } else {
-        crate::config::list_search_files(dir)
-    }
-}
-
 pub fn run(dir: &Path, query: &str, plain: bool, limit: Option<usize>, filter: &Filter) -> Result<String, String> {
-    search(dir, query, plain, false, limit, filter)
+    let terms = query_terms(query);
+    if terms.is_empty() && !filter.is_active() { return Err("provide a query or filter".into()); }
+    let corpus = load_corpus(dir, filter)?;
+    let (results, fallback) = score_corpus(&corpus, &terms, filter.mode);
+    let total = results.len();
+    let show = limit.map(|l| total.min(l)).unwrap_or(total);
+
+    let mut out = String::new();
+    if fallback { let _ = writeln!(out, "(no exact match — showing {} OR results)", results.len()); }
+    let mut last_file = String::new();
+    for r in results.iter().take(show) {
+        if r.name != last_file {
+            if plain { let _ = writeln!(out, "\n--- {} ---", r.name); }
+            else { let _ = writeln!(out, "\n\x1b[1;36m--- {} ---\x1b[0m", r.name); }
+            last_file = r.name.clone();
+        }
+        for line in &r.lines {
+            if !terms.is_empty() && terms.iter().any(|t| line.to_lowercase().contains(t.as_str())) {
+                if plain { let _ = writeln!(out, "> {line}"); }
+                else { let _ = writeln!(out, "\x1b[1;33m{line}\x1b[0m"); }
+            } else { let _ = writeln!(out, "{line}"); }
+        }
+        let _ = writeln!(out);
+    }
+    if total == 0 { out.push_str(&no_match_message(query, filter, dir)); }
+    else if show < total { let _ = writeln!(out, "(showing {show} of {total} matches)"); }
+    else { let _ = writeln!(out, "{total} matching section(s)"); }
+    Ok(out)
 }
 
 pub fn run_brief(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter) -> Result<String, String> {
-    search(dir, query, true, true, limit, filter)
-}
-
-pub fn run_medium(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter) -> Result<String, String> {
-    if !dir.exists() {
-        return Err(format!("{} not found", dir.display()));
-    }
-
     let terms = query_terms(query);
-    if terms.is_empty() && !filter.is_active() {
-        return Err("provide a query or filter (tag, topic, date range)".into());
-    }
-    let files = search_files(dir, filter)?;
-
-    let (results, fallback) = crate::cache::with_corpus(&files, |groups| {
-        let corpus = build_corpus(groups, filter);
-        score_corpus(&corpus, &terms, filter.mode)
-    });
-
+    if terms.is_empty() && !filter.is_active() { return Err("provide a query or filter".into()); }
+    let corpus = load_corpus(dir, filter)?;
+    let (results, fallback) = score_corpus(&corpus, &terms, filter.mode);
     let total = results.len();
     let show = limit.map(|l| total.min(l)).unwrap_or(total);
     let mut out = String::new();
-    if fallback {
-        let _ = writeln!(out, "(no exact match — showing OR results)");
-    }
-
-    // Medium format: [topic] timestamp header + tags + first 2 content lines
+    if fallback { let _ = writeln!(out, "(no exact match — showing OR results)"); }
     for r in results.iter().take(show) {
-        let header = r.section.first().map(|s| s.as_str()).unwrap_or("??");
-        let tags = extract_tags(&r.section);
+        let tags = extract_tags(&r.lines);
+        let tag_suffix = tags.map(|t| format!(" {t}")).unwrap_or_default();
+        let content = r.lines.iter().skip(1)
+            .find(|l| !l.starts_with("[tags:") && !l.trim().is_empty())
+            .map(|l| truncate(l.trim().trim_start_matches("- "), 80))
+            .unwrap_or("");
+        let _ = writeln!(out, "  [{}] {content}{tag_suffix}", r.name);
+    }
+    if total == 0 { out.push_str(&no_match_message(query, filter, dir)); }
+    else { let _ = writeln!(out, "{total} match(es)"); }
+    Ok(out)
+}
+
+pub fn run_medium(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter) -> Result<String, String> {
+    let terms = query_terms(query);
+    if terms.is_empty() && !filter.is_active() { return Err("provide a query or filter".into()); }
+    let corpus = load_corpus(dir, filter)?;
+    let (results, fallback) = score_corpus(&corpus, &terms, filter.mode);
+    let total = results.len();
+    let show = limit.map(|l| total.min(l)).unwrap_or(total);
+    let mut out = String::new();
+    if fallback { let _ = writeln!(out, "(no exact match — showing OR results)"); }
+    for r in results.iter().take(show) {
+        let header = r.lines.first().map(|s| s.as_str()).unwrap_or("??");
+        let tags = extract_tags(&r.lines);
         if let Some(ref t) = tags {
             let _ = writeln!(out, "  [{}] {} {}", r.name, header.trim_start_matches("## "), t);
         } else {
             let _ = writeln!(out, "  [{}] {}", r.name, header.trim_start_matches("## "));
         }
         let mut content_lines = 0;
-        for line in r.section.iter().skip(1) {
+        for line in r.lines.iter().skip(1) {
             if line.starts_with("[tags:") || line.trim().is_empty() { continue; }
-            let short = truncate(line.trim(), 100);
-            let _ = writeln!(out, "    {short}");
+            let _ = writeln!(out, "    {}", truncate(line.trim(), 100));
             content_lines += 1;
             if content_lines >= 2 { break; }
         }
     }
-
-    if total == 0 {
-        out.push_str(&no_match_message(query, filter, dir));
-    } else if show < total {
-        let _ = writeln!(out, "{total} match(es), showing {show}");
-    } else {
-        let _ = writeln!(out, "{total} match(es)");
-    }
+    if total == 0 { out.push_str(&no_match_message(query, filter, dir)); }
+    else if show < total { let _ = writeln!(out, "{total} match(es), showing {show}"); }
+    else { let _ = writeln!(out, "{total} match(es)"); }
     Ok(out)
 }
 
 pub fn run_topics(dir: &Path, query: &str, filter: &Filter) -> Result<String, String> {
-    if !dir.exists() {
-        return Err(format!("{} not found", dir.display()));
-    }
     let terms = query_terms(query);
-    if terms.is_empty() && !filter.is_active() {
-        return Err("provide a query or filter (tag, topic, date range)".into());
+    if terms.is_empty() && !filter.is_active() { return Err("provide a query or filter".into()); }
+    let corpus = load_corpus(dir, filter)?;
+    let count_fn = |mode: SearchMode| -> Vec<(String, usize)> {
+        let mut hits: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for ps in &corpus { if matches_tokens(&ps.tokens, &terms, mode) { *hits.entry(ps.name.clone()).or_insert(0) += 1; } }
+        hits.into_iter().collect()
+    };
+    let mut hits = count_fn(filter.mode);
+    let mut fallback = false;
+    if hits.is_empty() && filter.mode == SearchMode::And && terms.len() >= 2 {
+        hits = count_fn(SearchMode::Or);
+        fallback = !hits.is_empty();
     }
-    let files = search_files(dir, filter)?;
-
-    let (hits, fallback) = crate::cache::with_corpus(&files, |groups| {
-        let count_hits = |mode: SearchMode| -> Vec<(String, usize)> {
-            let mut hits = Vec::new();
-            for (name, entries) in &groups {
-                let n = entries.iter().filter(|e| {
-                    let refs: Vec<&str> = e.lines.iter().map(|s| s.as_str()).collect();
-                    passes_filter(&refs, filter) && matches_text(&e.text_lower, &terms, mode)
-                }).count();
-                if n > 0 { hits.push((name.to_string(), n)); }
-            }
-            hits
-        };
-        let mut hits = count_hits(filter.mode);
-        let mut fb = false;
-        if hits.is_empty() && filter.mode == SearchMode::And && terms.len() >= 2 {
-            hits = count_hits(SearchMode::Or);
-            fb = !hits.is_empty();
-        }
-        (hits, fb)
-    });
-
     let total: usize = hits.iter().map(|(_, n)| n).sum();
     let mut out = String::new();
-    if hits.is_empty() {
-        out.push_str(&no_match_message(query, filter, dir));
-    } else {
-        if fallback {
-            let _ = writeln!(out, "(no exact match — showing OR results)");
-        }
-        for (topic, n) in &hits {
-            let _ = writeln!(out, "  {topic}: {n} hit{}", if *n == 1 { "" } else { "s" });
-        }
+    if hits.is_empty() { out.push_str(&no_match_message(query, filter, dir)); }
+    else {
+        if fallback { let _ = writeln!(out, "(no exact match — showing OR results)"); }
+        for (topic, n) in &hits { let _ = writeln!(out, "  {topic}: {n} hit{}", if *n == 1 { "" } else { "s" }); }
         let _ = writeln!(out, "{total} match(es) across {} topic(s)", hits.len());
     }
     Ok(out)
 }
 
 pub fn count(dir: &Path, query: &str, filter: &Filter) -> Result<String, String> {
-    if !dir.exists() {
-        return Err(format!("{} not found", dir.display()));
-    }
     let terms = query_terms(query);
-    if terms.is_empty() && !filter.is_active() {
-        return Err("provide a query or filter (tag, topic, date range)".into());
+    if terms.is_empty() && !filter.is_active() { return Err("provide a query or filter".into()); }
+    let corpus = load_corpus(dir, filter)?;
+    let do_count = |mode: SearchMode| -> (usize, usize) {
+        let mut total = 0; let mut topics = std::collections::HashSet::new();
+        for ps in &corpus { if matches_tokens(&ps.tokens, &terms, mode) { total += 1; topics.insert(ps.name.clone()); } }
+        (total, topics.len())
+    };
+    let (total, topics) = do_count(filter.mode);
+    if total > 0 { return Ok(format!("{total} matches across {topics} topics for '{query}'")); }
+    if filter.mode == SearchMode::And && terms.len() >= 2 {
+        let (total, topics) = do_count(SearchMode::Or);
+        if total > 0 { return Ok(format!("(OR fallback) {total} matches across {topics} topics for '{query}'")); }
     }
-    let files = search_files(dir, filter)?;
-
-    crate::cache::with_corpus(&files, |groups| {
-        let do_count = |mode: SearchMode| -> (usize, usize) {
-            let mut total = 0;
-            let mut topics = 0;
-            for (_, entries) in &groups {
-                let hits = entries.iter().filter(|e| {
-                    let refs: Vec<&str> = e.lines.iter().map(|s| s.as_str()).collect();
-                    passes_filter(&refs, filter) && matches_text(&e.text_lower, &terms, mode)
-                }).count();
-                total += hits;
-                if hits > 0 { topics += 1; }
-            }
-            (total, topics)
-        };
-
-        let (total, topics) = do_count(filter.mode);
-        if total > 0 {
-            return Ok(format!("{total} matches across {topics} topics for '{query}'"));
-        }
-        if filter.mode == SearchMode::And && terms.len() >= 2 {
-            let (total, topics) = do_count(SearchMode::Or);
-            if total > 0 {
-                return Ok(format!("(no exact match — OR fallback) {total} matches across {topics} topics for '{query}'"));
-            }
-        }
-        Ok(format!("0 matches for '{query}'"))
-    })
+    Ok(format!("0 matches for '{query}'"))
 }
 
-/// Grouped search: results organized by topic, not flat BM25 rank.
 pub fn run_grouped(dir: &Path, query: &str, limit_per_topic: Option<usize>, filter: &Filter) -> Result<String, String> {
-    if !dir.exists() {
-        return Err(format!("{} not found", dir.display()));
-    }
     let terms = query_terms(query);
-    if terms.is_empty() {
-        return Err("query required for entity search".into());
-    }
-    let files = search_files(dir, filter)?;
+    if terms.is_empty() { return Err("query required for entity search".into()); }
+    let corpus = load_corpus(dir, filter)?;
+    let (results, fallback) = score_corpus(&corpus, &terms, filter.mode);
+    if results.is_empty() { return Ok(no_match_message(query, filter, dir)); }
     let cap = limit_per_topic.unwrap_or(5);
-
-    let (results, fallback) = crate::cache::with_corpus(&files, |groups| {
-        let corpus = build_corpus(groups, filter);
-        score_corpus(&corpus, &terms, filter.mode)
-    });
-
-    if results.is_empty() {
-        return Ok(no_match_message(query, filter, dir));
-    }
-
-    // Group by topic, preserving BM25 sort within each group
-    let mut groups: std::collections::BTreeMap<String, Vec<&ScoredResult>> =
-        std::collections::BTreeMap::new();
-    for r in &results {
-        groups.entry(r.name.clone()).or_default().push(r);
-    }
-
-    // Sort topics by best score in each group
+    let mut groups: std::collections::BTreeMap<String, Vec<&ScoredResult>> = std::collections::BTreeMap::new();
+    for r in &results { groups.entry(r.name.clone()).or_default().push(r); }
     let mut topic_order: Vec<(String, f64)> = groups.iter()
-        .map(|(name, entries)| (name.clone(), entries.first().map(|e| e.score).unwrap_or(0.0)))
-        .collect();
+        .map(|(n, e)| (n.clone(), e.first().map(|e| e.score).unwrap_or(0.0))).collect();
     topic_order.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut out = String::new();
-    if fallback {
-        let _ = writeln!(out, "(no exact match — showing OR results)");
-    }
     let total: usize = groups.values().map(|v| v.len()).sum();
+    let mut out = String::new();
+    if fallback { let _ = writeln!(out, "(no exact match — showing OR results)"); }
     let _ = writeln!(out, "'{}' across {} topics ({} matches):\n", query, groups.len(), total);
-
     for (name, _) in &topic_order {
         let entries = &groups[name];
         let _ = writeln!(out, "[{}] {} matches", name, entries.len());
         for r in entries.iter().take(cap) {
-            let header = r.section.first().map(|s| s.as_str()).unwrap_or("??");
+            let header = r.lines.first().map(|s| s.as_str()).unwrap_or("??");
             let _ = write!(out, "  {} — ", header.trim_start_matches("## "));
-            // First non-metadata content line
-            if let Some(line) = r.section.iter().skip(1)
+            if let Some(line) = r.lines.iter().skip(1)
                 .find(|l| !l.starts_with("[tags:") && !l.starts_with("[source:") && !l.starts_with("[type:") && !l.trim().is_empty()) {
                 let _ = writeln!(out, "{}", truncate(line.trim(), 90));
-            } else {
-                let _ = writeln!(out);
-            }
+            } else { let _ = writeln!(out); }
         }
-        if entries.len() > cap {
-            let _ = writeln!(out, "  ...and {} more", entries.len() - cap);
-        }
+        if entries.len() > cap { let _ = writeln!(out, "  ...and {} more", entries.len() - cap); }
         let _ = writeln!(out);
     }
     Ok(out)
 }
 
-/// BM25 parameters (Okapi BM25 standard values)
+// --- Core BM25 ---
 const BM25_K1: f64 = 1.2;
 const BM25_B: f64 = 0.75;
-const HEADER_BOOST: f64 = 2.0;
 
-/// Scored search result for ranking.
-struct ScoredResult {
-    name: String,
-    section: Vec<String>,
-    score: f64,
-}
+struct PrepSection { name: String, lines: Vec<String>, tokens: Vec<String>, word_count: usize }
+struct ScoredResult { name: String, lines: Vec<String>, score: f64 }
 
-/// Pre-processed section for BM25 corpus stats.
-struct PrepSection {
-    name: String,
-    lines: Vec<String>,
-    text_lower: String,
-    word_count: usize,
-}
-
-/// Build corpus from cached entries, applying filters.
-fn build_corpus(groups: Vec<(&str, &[CachedEntry])>, filter: &Filter) -> Vec<PrepSection> {
+fn load_corpus(dir: &Path, filter: &Filter) -> Result<Vec<PrepSection>, String> {
+    let log_path = crate::config::log_path(dir);
+    if !log_path.exists() { return Err("no data.log found".into()); }
+    let entries = crate::datalog::iter_live(&log_path)?;
     let mut corpus = Vec::new();
-    for (name, entries) in groups {
-        for entry in entries {
-            let section_refs: Vec<&str> = entry.lines.iter().map(|s| s.as_str()).collect();
-            if !passes_filter(&section_refs, filter) { continue; }
-            corpus.push(PrepSection {
-                name: name.to_string(),
-                lines: entry.lines.clone(),
-                text_lower: entry.text_lower.clone(),
-                word_count: entry.word_count,
-            });
-        }
+    for e in &entries {
+        if let Some(ref t) = filter.topic { if e.topic != *t { continue; } }
+        if !passes_filter_entry(e, filter) { continue; }
+        let date = crate::time::minutes_to_date_str(e.timestamp_min);
+        let mut lines = vec![format!("## {date}")];
+        for line in e.body.lines() { lines.push(line.to_string()); }
+        let tokens = tokenize(&e.body);
+        let word_count = tokens.len();
+        corpus.push(PrepSection { name: e.topic.clone(), lines, tokens, word_count });
     }
-    corpus
+    Ok(corpus)
 }
 
-/// Score corpus with BM25, return sorted results + fallback flag.
+fn passes_filter_entry(e: &crate::datalog::LogEntry, f: &Filter) -> bool {
+    if f.after.is_some() || f.before.is_some() {
+        let days = e.timestamp_min as i64 / 1440;
+        if let Some(after) = f.after { if days < after { return false; } }
+        if let Some(before) = f.before { if days > before { return false; } }
+    }
+    if let Some(ref tag) = f.tag {
+        let tl = tag.to_lowercase();
+        let has = e.body.lines().any(|line|
+            line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']'))
+                .map(|inner| inner.split(',').any(|t| t.trim().to_lowercase() == tl))
+                .unwrap_or(false));
+        if !has { return false; }
+    }
+    true
+}
+
 fn score_corpus(corpus: &[PrepSection], terms: &[String], mode: SearchMode) -> (Vec<ScoredResult>, bool) {
     let n = corpus.len() as f64;
     let total_words: usize = corpus.iter().map(|s| s.word_count).sum();
     let avgdl = if corpus.is_empty() { 1.0 } else { total_words as f64 / n };
     let dfs: Vec<usize> = terms.iter()
-        .map(|t| corpus.iter().filter(|s| s.text_lower.contains(t.as_str())).count())
-        .collect();
-
-    let mut cur_mode = mode;
-    let mut results: Vec<ScoredResult> = Vec::new();
-    for ps in corpus {
-        if matches_text(&ps.text_lower, terms, cur_mode) {
-            let score = bm25_score(&ps.text_lower, terms, n, avgdl, &dfs);
-            results.push(ScoredResult {
-                name: ps.name.clone(), section: ps.lines.clone(), score,
-            });
-        }
-    }
-
+        .map(|t| corpus.iter().filter(|s| s.tokens.contains(t)).count()).collect();
+    let mut results = score_mode(corpus, terms, mode, n, avgdl, &dfs);
     let mut fallback = false;
-    if results.is_empty() && cur_mode == SearchMode::And && terms.len() >= 2 {
-        cur_mode = SearchMode::Or;
-        for ps in corpus {
-            if matches_text(&ps.text_lower, terms, cur_mode) {
-                let score = bm25_score(&ps.text_lower, terms, n, avgdl, &dfs);
-                results.push(ScoredResult {
-                    name: ps.name.clone(), section: ps.lines.clone(), score,
-                });
-            }
-        }
+    if results.is_empty() && mode == SearchMode::And && terms.len() >= 2 {
+        results = score_mode(corpus, terms, SearchMode::Or, n, avgdl, &dfs);
         fallback = !results.is_empty();
     }
-
-    if !terms.is_empty() {
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    }
+    if !terms.is_empty() { results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)); }
     (results, fallback)
 }
 
-/// BM25 score: IDF × saturated TF × header boost.
-fn bm25_score(text: &str, terms: &[String], n: f64, avgdl: f64, dfs: &[usize]) -> f64 {
-    if terms.is_empty() { return 1.0; }
-    let doc_len = text.split_whitespace().count() as f64;
-    let len_norm = 1.0 - BM25_B + BM25_B * doc_len / avgdl.max(1.0);
-    let header_end = text.find('\n').unwrap_or(text.len());
-    let header = &text[..header_end];
-    let mut score = 0.0;
-    for (i, term) in terms.iter().enumerate() {
-        let tf = text.split_whitespace()
-            .filter(|w| w.contains(term.as_str()))
-            .count() as f64;
-        if tf == 0.0 { continue; }
-        let df = dfs[i] as f64;
-        let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
-        let tf_sat = (tf * (BM25_K1 + 1.0)) / (tf + BM25_K1 * len_norm);
-        let mut ts = idf * tf_sat;
-        if header.contains(term.as_str()) { ts *= HEADER_BOOST; }
-        score += ts;
-    }
-    score
-}
-
-/// Match against pre-lowercased text.
-fn matches_text(text: &str, terms: &[String], mode: SearchMode) -> bool {
-    if terms.is_empty() { return true; }
-    match mode {
-        SearchMode::And => terms.iter().all(|t| text.contains(t.as_str())),
-        SearchMode::Or => terms.iter().any(|t| text.contains(t.as_str())),
-    }
-}
-
-fn search(dir: &Path, query: &str, plain: bool, brief: bool, limit: Option<usize>, filter: &Filter) -> Result<String, String> {
-    if !dir.exists() {
-        return Err(format!("{} not found", dir.display()));
-    }
-
-    let terms = query_terms(query);
-    if terms.is_empty() && !filter.is_active() {
-        return Err("provide a query or filter (tag, topic, date range)".into());
-    }
-    let files = search_files(dir, filter)?;
-
-    // Phase 1: get entries from cache (re-reads only changed files)
-    let (results, fallback) = crate::cache::with_corpus(&files, |groups| {
-        let corpus = build_corpus(groups, filter);
-        score_corpus(&corpus, &terms, filter.mode)
-    });
-
-    let total = results.len();
-    let show = match limit {
-        Some(lim) => results.len().min(lim),
-        None => results.len(),
-    };
-
-    let mut out = String::new();
-    if fallback {
-        let _ = writeln!(out, "(no exact match — showing {} OR results)", results.len());
-    }
-
-    let mut last_file = String::new();
-
-    for result in results.iter().take(show) {
-        if brief {
-            let section_refs: Vec<&str> = result.section.iter().map(|s| s.as_str()).collect();
-            let tags = extract_tags(&section_refs);
-            let tag_suffix = tags.map(|t| format!(" {t}")).unwrap_or_default();
-            if terms.is_empty() {
-                if let Some(hit) = section_refs.iter().find(|l| !l.starts_with("## ") && !l.starts_with("[tags:") && !l.trim().is_empty()) {
-                    let short = truncate(hit.trim(), 80);
-                    let _ = writeln!(out, "  [{}] {short}{tag_suffix}", result.name);
-                }
-            } else if let Some(hit) = section_refs.iter().find(|l| terms.iter().any(|t| l.to_lowercase().contains(t.as_str()))) {
-                let trimmed = hit.trim_start_matches("- ").trim();
-                let short = truncate(trimmed, 80);
-                let _ = writeln!(out, "  [{}] {short}{tag_suffix}", result.name);
-            }
-        } else {
-            if result.name != last_file {
-                if plain {
-                    let _ = writeln!(out, "\n--- {}.md ---", result.name);
-                } else {
-                    let _ = writeln!(out, "\n\x1b[1;36m--- {}.md ---\x1b[0m", result.name);
-                }
-                last_file = result.name.clone();
-            }
-            for line in &result.section {
-                if !terms.is_empty() && terms.iter().any(|t| line.to_lowercase().contains(t.as_str())) {
-                    if plain {
-                        let _ = writeln!(out, "> {line}");
-                    } else {
-                        let _ = writeln!(out, "\x1b[1;33m{line}\x1b[0m");
-                    }
-                } else {
-                    let _ = writeln!(out, "{line}");
-                }
-            }
-            let _ = writeln!(out);
+fn score_mode(corpus: &[PrepSection], terms: &[String], mode: SearchMode, n: f64, avgdl: f64, dfs: &[usize]) -> Vec<ScoredResult> {
+    corpus.iter().filter(|ps| matches_tokens(&ps.tokens, terms, mode)).filter_map(|ps| {
+        let len_norm = 1.0 - BM25_B + BM25_B * ps.word_count as f64 / avgdl.max(1.0);
+        let mut score = 0.0;
+        for (i, term) in terms.iter().enumerate() {
+            let tf = ps.tokens.iter().filter(|t| *t == term).count() as f64;
+            if tf == 0.0 { continue; }
+            let df = dfs[i] as f64;
+            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+            score += idf * (tf * (BM25_K1 + 1.0)) / (tf + BM25_K1 * len_norm);
         }
-    }
-
-    if total == 0 {
-        out.push_str(&no_match_message(query, filter, dir));
-    } else if show < total {
-        let _ = writeln!(out, "(showing {show} of {total} matches, limit applied)");
-    } else if brief {
-        let _ = writeln!(out, "{total} match(es)");
-    } else {
-        let _ = writeln!(out, "{total} matching section(s)");
-    }
-    Ok(out)
+        if score == 0.0 { return None; }
+        // Topic-name boost: entries in a topic matching query terms rank higher
+        let topic_lower = ps.name.to_lowercase();
+        if terms.iter().any(|t| topic_lower.contains(t.as_str())) { score *= 1.5; }
+        // Tag boost: curated tags matching query terms are high-signal
+        if let Some(tag_line) = ps.lines.iter().find(|l| l.starts_with("[tags: ")) {
+            let tag_lower = tag_line.to_lowercase();
+            let tag_hits = terms.iter().filter(|t| tag_lower.contains(t.as_str())).count();
+            if tag_hits > 0 { score *= 1.0 + 0.3 * tag_hits as f64; }
+        }
+        Some(ScoredResult { name: ps.name.clone(), lines: ps.lines.clone(), score })
+    }).collect()
 }
 
-/// Build a helpful "no matches" message. If tag filter is active and tag
-/// doesn't exist, tell the user. Suggest existing tags if possible.
+fn matches_tokens(tokens: &[String], terms: &[String], mode: SearchMode) -> bool {
+    if terms.is_empty() { return true; }
+    match mode { SearchMode::And => terms.iter().all(|t| tokens.contains(t)),
+                  SearchMode::Or => terms.iter().any(|t| tokens.contains(t)) }
+}
+
 fn no_match_message(query: &str, filter: &Filter, dir: &Path) -> String {
     let mut msg = String::new();
     if let Some(ref tag) = filter.tag {
         let existing = collect_all_tags(dir);
         if !existing.iter().any(|(t, _)| t == &tag.to_lowercase()) {
             let _ = writeln!(msg, "tag '{}' not found", tag);
-            if !existing.is_empty() {
-                // Suggest similar tags
-                let similar: Vec<&str> = existing.iter()
-                    .filter(|(t, _)| t.contains(&tag.to_lowercase()) || tag.to_lowercase().contains(t.as_str()))
-                    .map(|(t, _)| t.as_str())
-                    .take(5)
-                    .collect();
-                if !similar.is_empty() {
-                    let _ = writeln!(msg, "  similar: {}", similar.join(", "));
-                } else {
-                    let top: Vec<&str> = existing.iter().take(8).map(|(t, _)| t.as_str()).collect();
-                    let _ = writeln!(msg, "  existing tags: {}", top.join(", "));
-                }
-            }
+            let similar: Vec<&str> = existing.iter()
+                .filter(|(t, _)| t.contains(&tag.to_lowercase()) || tag.to_lowercase().contains(t.as_str()))
+                .map(|(t, _)| t.as_str()).take(5).collect();
+            if !similar.is_empty() { let _ = writeln!(msg, "  similar: {}", similar.join(", ")); }
+            else { let top: Vec<&str> = existing.iter().take(8).map(|(t, _)| t.as_str()).collect();
+                if !top.is_empty() { let _ = writeln!(msg, "  existing tags: {}", top.join(", ")); } }
             return msg;
         }
         let _ = writeln!(msg, "no entries with tag '{}' match '{}'", tag, query);
-    } else {
-        let _ = writeln!(msg, "no matches for '{query}'");
-    }
+    } else { let _ = writeln!(msg, "no matches for '{query}'"); }
     msg
 }
 
-/// Collect all tags across all topic files, sorted by frequency.
 fn collect_all_tags(dir: &Path) -> Vec<(String, usize)> {
-    let files = match crate::config::list_topic_files(dir) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
+    let log_path = crate::config::log_path(dir);
+    let entries = match crate::datalog::iter_live(&log_path) { Ok(e) => e, Err(_) => return Vec::new() };
     let mut tags: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for path in &files {
-        let content = match fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        for line in content.lines() {
+    for e in &entries {
+        for line in e.body.lines() {
             if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
-                for tag in inner.split(',') {
-                    let t = tag.trim().to_lowercase();
-                    if !t.is_empty() { *tags.entry(t).or_insert(0) += 1; }
-                }
+                for tag in inner.split(',') { let t = tag.trim().to_lowercase();
+                    if !t.is_empty() { *tags.entry(t).or_insert(0) += 1; } }
             }
         }
     }
     let mut sorted: Vec<(String, usize)> = tags.into_iter().collect();
     sorted.sort_by(|a, b| b.1.cmp(&a.1));
     sorted
-}
-
-/// Check if a section passes date and tag filters.
-fn passes_filter(section: &[&str], filter: &Filter) -> bool {
-    // Date filter: extract from "## YYYY-MM-DD HH:MM" header
-    if filter.after.is_some() || filter.before.is_some() {
-        let date = section.first()
-            .and_then(|h| h.strip_prefix("## "))
-            .and_then(crate::time::parse_date_days);
-        match date {
-            Some(d) => {
-                if let Some(after) = filter.after {
-                    if d < after { return false; }
-                }
-                if let Some(before) = filter.before {
-                    if d > before { return false; }
-                }
-            }
-            None => return false, // no parseable date → skip when date filter active
-        }
-    }
-    // Tag filter: look for "[tags: ...]" line in section
-    if let Some(ref tag) = filter.tag {
-        let tag_lower = tag.to_lowercase();
-        let has_tag = section.iter().any(|line| {
-            if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
-                inner.split(',').any(|t| t.trim().to_lowercase() == tag_lower)
-            } else {
-                false
-            }
-        });
-        if !has_tag { return false; }
-    }
-    true
-}
-
-/// Split query into lowercase terms. Splits CamelCase and snake_case into components.
-fn query_terms(query: &str) -> Vec<String> {
-    let mut terms = Vec::new();
-    for word in query.split_whitespace() {
-        let lower = word.to_lowercase();
-        terms.push(lower.clone());
-        // Split CamelCase BEFORE lowercasing: "SysctlHelper" → ["sysctl", "helper"]
-        let parts = split_compound(word);
-        if parts.len() > 1 {
-            for part in parts {
-                if part.len() >= 3 && !terms.contains(&part) {
-                    terms.push(part);
-                }
-            }
-        }
-    }
-    terms
-}
-
-/// Split CamelCase, snake_case, and kebab-case into component words.
-fn split_compound(s: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    // First split on _ and -
-    for segment in s.split(|c: char| c == '_' || c == '-') {
-        if segment.is_empty() { continue; }
-        // Then split CamelCase within each segment
-        let mut current = String::new();
-        let chars: Vec<char> = segment.chars().collect();
-        for i in 0..chars.len() {
-            if i > 0 && chars[i].is_uppercase() {
-                if !current.is_empty() {
-                    parts.push(current.to_lowercase());
-                    current = String::new();
-                }
-            }
-            current.push(chars[i]);
-        }
-        if !current.is_empty() {
-            parts.push(current.to_lowercase());
-        }
-    }
-    parts
-}
-
-/// Match terms against section content. AND requires all terms, OR requires any.
-fn matches_terms(section: &[&str], terms: &[String], mode: SearchMode) -> bool {
-    if terms.is_empty() { return true; }
-    let combined: String = section.iter().map(|l| l.to_lowercase()).collect::<Vec<_>>().join("\n");
-    match mode {
-        SearchMode::And => terms.iter().all(|term| combined.contains(term.as_str())),
-        SearchMode::Or => terms.iter().any(|term| combined.contains(term.as_str())),
-    }
-}
-
-/// Extract tags from a section as a compact "#tag1 #tag2" string.
-fn extract_tags(section: &[impl AsRef<str>]) -> Option<String> {
-    for line in section {
-        if let Some(inner) = line.as_ref().strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
-            let tags: Vec<&str> = inner.split(',').map(|t| t.trim()).filter(|t| !t.is_empty()).collect();
-            if !tags.is_empty() {
-                return Some(tags.iter().map(|t| format!("#{t}")).collect::<Vec<_>>().join(" "));
-            }
-        }
-    }
-    None
-}
-
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max { return s; }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
-    &s[..end]
-}
-
-/// Check if a line is an entry header: "## YYYY-MM-DD" pattern.
-/// Prevents "## " in entry body text from breaking section boundaries.
-pub fn is_entry_header(line: &str) -> bool {
-    let b = line.as_bytes();
-    // "## YYYY-" = 8 chars minimum
-    b.len() >= 8 && b[0] == b'#' && b[1] == b'#' && b[2] == b' '
-        && b[3].is_ascii_digit() && b[4].is_ascii_digit()
-        && b[5].is_ascii_digit() && b[6].is_ascii_digit() && b[7] == b'-'
-}
-
-pub fn parse_sections(content: &str) -> Vec<Vec<&str>> {
-    let mut sections: Vec<Vec<&str>> = Vec::new();
-    let mut current: Vec<&str> = Vec::new();
-
-    for line in content.lines() {
-        if is_entry_header(line) && !current.is_empty() {
-            sections.push(current);
-            current = Vec::new();
-        }
-        current.push(line);
-    }
-    if !current.is_empty() {
-        sections.push(current);
-    }
-    sections
 }

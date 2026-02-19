@@ -1,30 +1,21 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
-use std::fs;
 use std::path::Path;
 
-/// List all tags used across all topics with counts.
 pub fn list_tags(dir: &Path) -> Result<String, String> {
-    if !dir.exists() {
-        return Err(format!("{} not found", dir.display()));
-    }
-    let files = crate::config::list_topic_files(dir)?;
+    let log_path = crate::config::log_path(dir);
+    let entries = crate::datalog::iter_live(&log_path)?;
     let mut tags: BTreeMap<String, usize> = BTreeMap::new();
-
-    for path in &files {
-        let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        for line in content.lines() {
+    for e in &entries {
+        for line in e.body.lines() {
             if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
                 for tag in inner.split(',') {
                     let t = tag.trim().to_lowercase();
-                    if !t.is_empty() {
-                        *tags.entry(t).or_insert(0) += 1;
-                    }
+                    if !t.is_empty() { *tags.entry(t).or_insert(0) += 1; }
                 }
             }
         }
     }
-
     let mut out = String::new();
     if tags.is_empty() {
         let _ = writeln!(out, "no tags found");
@@ -37,32 +28,23 @@ pub fn list_tags(dir: &Path) -> Result<String, String> {
     Ok(out)
 }
 
-/// Show stats: topic count, entry count, date range, tag count.
 pub fn stats(dir: &Path) -> Result<String, String> {
-    if !dir.exists() {
-        return Err(format!("{} not found", dir.display()));
-    }
-    let files = crate::config::list_topic_files(dir)?;
-    let mut total_entries = 0;
-    let mut total_lines = 0;
-    let mut oldest: Option<i64> = None;
-    let mut newest: Option<i64> = None;
+    let log_path = crate::config::log_path(dir);
+    let entries = crate::datalog::iter_live(&log_path)?;
+    let mut topics: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut tags: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut tagged_entries = 0;
-
-    for path in &files {
-        let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        total_lines += content.lines().count();
-        for line in content.lines() {
-            if line.starts_with("## ") {
-                total_entries += 1;
-                if let Some(d) = crate::time::parse_date_days(line.trim_start_matches("## ")) {
-                    oldest = Some(oldest.map_or(d, |o: i64| o.min(d)));
-                    newest = Some(newest.map_or(d, |n: i64| n.max(d)));
-                }
-            }
+    let mut tagged = 0usize;
+    let mut oldest: Option<i32> = None;
+    let mut newest: Option<i32> = None;
+    for e in &entries {
+        topics.insert(e.topic.clone());
+        if e.timestamp_min != 0 {
+            oldest = Some(oldest.map_or(e.timestamp_min, |o: i32| o.min(e.timestamp_min)));
+            newest = Some(newest.map_or(e.timestamp_min, |n: i32| n.max(e.timestamp_min)));
+        }
+        for line in e.body.lines() {
             if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
-                tagged_entries += 1;
+                tagged += 1;
                 for tag in inner.split(',') {
                     let t = tag.trim().to_lowercase();
                     if !t.is_empty() { tags.insert(t); }
@@ -70,72 +52,84 @@ pub fn stats(dir: &Path) -> Result<String, String> {
             }
         }
     }
-
+    let now_days = crate::time::LocalTime::now().to_days();
     let mut out = String::new();
-    let _ = writeln!(out, "topics:         {}", files.len());
-    let _ = writeln!(out, "entries:        {total_entries}");
-    let _ = writeln!(out, "total lines:    {total_lines}");
-    let _ = writeln!(out, "tagged entries: {tagged_entries}");
+    let _ = writeln!(out, "topics:         {}", topics.len());
+    let _ = writeln!(out, "entries:        {}", entries.len());
+    let _ = writeln!(out, "tagged entries: {tagged}");
     let _ = writeln!(out, "unique tags:    {}", tags.len());
     if let (Some(o), Some(n)) = (oldest, newest) {
-        let _ = writeln!(out, "oldest entry:   {} days ago", crate::time::LocalTime::now().to_days() - o);
-        let _ = writeln!(out, "newest entry:   {} days ago", crate::time::LocalTime::now().to_days() - n);
+        let _ = writeln!(out, "oldest entry:   {} days ago", now_days - o as i64 / 1440);
+        let _ = writeln!(out, "newest entry:   {} days ago", now_days - n as i64 / 1440);
     }
     Ok(out)
 }
 
-/// Fetch a single entry by index.
-pub fn get_entry(dir: &Path, topic: &str, idx: usize) -> Result<String, String> {
-    let filename = crate::config::sanitize_topic(topic);
-    let filepath = dir.join(format!("{filename}.md"));
-    if !filepath.exists() {
-        return Err(format!("{filename}.md not found"));
-    }
-    let content = fs::read_to_string(&filepath).map_err(|e| e.to_string())?;
-    let sections = crate::delete::split_sections(&content);
-    if idx >= sections.len() {
-        return Err(format!("index {idx} out of range (topic has {} entries, 0-{})",
-            sections.len(), sections.len().saturating_sub(1)));
-    }
-    let (hdr, body) = &sections[idx];
-    Ok(format!("{hdr}\n{body}"))
-}
-
-/// List entries in a topic, optionally filtered by match_str. For bulk review.
-pub fn list_entries(dir: &Path, topic: &str, match_str: Option<&str>) -> Result<String, String> {
-    let filename = crate::config::sanitize_topic(topic);
-    let filepath = dir.join(format!("{filename}.md"));
-    if !filepath.exists() {
-        return Err(format!("{filename}.md not found"));
-    }
-
-    let content = fs::read_to_string(&filepath).map_err(|e| e.to_string())?;
-    let sections = crate::delete::split_sections(&content);
-    let mut out = String::new();
-    let mut shown = 0;
-
-    for (i, (hdr, body)) in sections.iter().enumerate() {
-        let entry_text = format!("{hdr}\n{body}");
-        if let Some(needle) = match_str {
-            if !entry_text.to_lowercase().contains(&needle.to_lowercase()) {
-                continue;
+pub fn check_stale(dir: &Path) -> Result<String, String> {
+    let log_path = crate::config::log_path(dir);
+    if !log_path.exists() { return Err("no data.log found".into()); }
+    let entries = crate::datalog::iter_live(&log_path)?;
+    let mut stale = Vec::new();
+    let mut checked = 0usize;
+    for e in &entries {
+        let lines: Vec<&str> = e.body.lines().collect();
+        if let Some((ref src_path, _)) = crate::config::parse_source(&lines) {
+            checked += 1;
+            let date = crate::time::minutes_to_date_str(e.timestamp_min);
+            if let Some(msg) = crate::config::check_staleness(src_path, &date) {
+                let preview = lines.iter()
+                    .find(|l| !l.starts_with('[') && !l.trim().is_empty())
+                    .map(|l| l.trim()).unwrap_or("");
+                let short = if preview.len() > 60 { &preview[..60] } else { preview };
+                stale.push(format!("  [{}] {date}: {msg}\n    {short}", e.topic));
             }
         }
+    }
+    if stale.is_empty() {
+        Ok(format!("checked {checked} sourced entries: all fresh"))
+    } else {
+        Ok(format!("{} stale of {checked} sourced entries:\n{}", stale.len(), stale.join("\n")))
+    }
+}
+
+pub fn get_entry(dir: &Path, topic: &str, idx: usize) -> Result<String, String> {
+    let log_path = crate::config::log_path(dir);
+    let entries = crate::delete::topic_entries(&log_path, topic)?;
+    if entries.is_empty() { return Err(format!("topic '{}' not found", topic)); }
+    if idx >= entries.len() {
+        return Err(format!("index {idx} out of range (topic has {} entries, 0-{})",
+            entries.len(), entries.len().saturating_sub(1)));
+    }
+    let e = &entries[idx];
+    let date = crate::time::minutes_to_date_str(e.timestamp_min);
+    Ok(format!("## {date}\n{}", e.body))
+}
+
+pub fn list_entries(dir: &Path, topic: &str, match_str: Option<&str>) -> Result<String, String> {
+    let log_path = crate::config::log_path(dir);
+    let entries = crate::delete::topic_entries(&log_path, topic)?;
+    if entries.is_empty() { return Err(format!("topic '{}' not found", topic)); }
+    let mut out = String::new();
+    let mut shown = 0;
+    for (i, e) in entries.iter().enumerate() {
+        if let Some(needle) = match_str {
+            if !e.body.to_lowercase().contains(&needle.to_lowercase()) { continue; }
+        }
         shown += 1;
-        let preview = body.lines()
+        let date = crate::time::minutes_to_date_str(e.timestamp_min);
+        let preview = e.body.lines()
             .find(|l| !l.trim().is_empty() && !l.starts_with("[tags:"))
             .map(|l| {
                 let t = l.trim().trim_start_matches("- ");
                 if t.len() > 70 { &t[..70] } else { t }
             })
             .unwrap_or("(empty)");
-        let _ = writeln!(out, "  [{i}] {hdr} — {preview}");
+        let _ = writeln!(out, "  [{i}] ## {date} — {preview}");
     }
-
     if shown == 0 {
         let _ = writeln!(out, "no entries{}", match_str.map(|s| format!(" matching \"{s}\"")).unwrap_or_default());
     } else {
-        let _ = writeln!(out, "\n{shown} of {} entries shown", sections.len());
+        let _ = writeln!(out, "\n{shown} of {} entries shown", entries.len());
     }
     Ok(out)
 }

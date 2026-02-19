@@ -1,47 +1,38 @@
-//! Topic dependency graph: scan all topics for cross-references,
-//! build bidirectional adjacency list.
+//! Topic dependency graph from data.log: scan for cross-references.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
-use std::fs;
 use std::path::Path;
 
 pub fn run(dir: &Path) -> Result<String, String> {
-    let files = crate::config::list_topic_files(dir)?;
+    let log_path = crate::config::log_path(dir);
+    let entries = crate::datalog::iter_live(&log_path)?;
 
-    // Collect all topic names
-    let names: Vec<String> = files.iter()
-        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
-        .collect();
+    let mut names_set = std::collections::BTreeSet::new();
+    for e in &entries { names_set.insert(e.topic.clone()); }
+    let names: Vec<String> = names_set.into_iter().collect();
 
-    // outgoing[A] = set of topics mentioned IN A's content
     let mut outgoing: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
-    // incoming[B] = set of topics that mention B
     let mut incoming: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
 
-    for path in &files {
-        let src = path.file_stem().unwrap().to_string_lossy().to_string();
-        let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let content_lower = content.to_lowercase();
-
+    for e in &entries {
+        let content_lower = e.body.to_lowercase();
         for target in &names {
-            if target == &src { continue; }
-            // Count mentions of target topic name in source content
+            if target == &e.topic { continue; }
             let count = content_lower.matches(target.as_str()).count();
             if count > 0 {
-                *outgoing.entry(src.clone()).or_default()
+                *outgoing.entry(e.topic.clone()).or_default()
                     .entry(target.clone()).or_insert(0) += count;
                 *incoming.entry(target.clone()).or_default()
-                    .entry(src.clone()).or_insert(0) += count;
+                    .entry(e.topic.clone()).or_insert(0) += count;
             }
         }
     }
 
-    // Sort by total references (outgoing + incoming)
     let mut topics: Vec<(String, usize)> = names.iter().map(|n| {
-        let out_count: usize = outgoing.get(n).map(|m| m.values().sum()).unwrap_or(0);
-        let in_count: usize = incoming.get(n).map(|m| m.values().sum()).unwrap_or(0);
-        (n.clone(), out_count + in_count)
+        let oc: usize = outgoing.get(n).map(|m| m.values().sum()).unwrap_or(0);
+        let ic: usize = incoming.get(n).map(|m| m.values().sum()).unwrap_or(0);
+        (n.clone(), oc + ic)
     }).collect();
     topics.sort_by(|a, b| b.1.cmp(&a.1));
 

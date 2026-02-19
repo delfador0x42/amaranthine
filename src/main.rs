@@ -1,4 +1,4 @@
-use amaranthine::{config, search, store, context, delete, edit, index,
+use amaranthine::{config, search, store, context, delete, edit,
     topics, prune, digest, stats, compact, export, xref, migrate, mcp,
     install, time, json};
 use std::env;
@@ -132,7 +132,7 @@ fn main() {
             }
         }
         Some("edit") => Err("usage: edit <topic> --match <substring> <new text>".into()),
-        Some("index") => index::run(&dir),
+        Some("index") => Err("index command removed in v4 (no .md files)".into()),
         Some("recent") => {
             let days = cmd.get(1).and_then(|s| s.parse().ok()).unwrap_or(7u64);
             topics::recent(&dir, days, plain)
@@ -233,7 +233,6 @@ fn print_help() {
         "  context [query] [--brief]    Session briefing (--brief: topics only)\n",
         "  delete <topic> --last|--all|--match <str>  Remove entries\n",
         "  edit <topic> --match <str> <text>           Update matching entry\n",
-        "  index                        Generate topic manifest\n",
         "  recent [days]                Entries from last N days (default: 7)\n",
         "  topics                       List topics with counts\n",
         "  prune [--stale N]            Flag stale topics (default: 30 days)\n",

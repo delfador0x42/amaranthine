@@ -3,7 +3,7 @@
 Persistent knowledge base for AI coding agents. Zero dependencies, ~640KB binary.
 
 Your coding agent forgets everything between sessions. amaranthine gives it a
-memory that persists — plain markdown files it can store, search, and read.
+memory that persists — an append-only data log it can store, search, and reconstruct.
 
 ## Install
 
@@ -24,7 +24,7 @@ Restart Claude Code. Your agent now has persistent memory.
 
 ## What the agent gets
 
-31 MCP tools, organized by function:
+36 MCP tools, organized by function:
 
 **Search** — find knowledge across all topics
 | Tool | What it does |
@@ -34,6 +34,7 @@ Restart Claude Code. Your agent now has persistent memory.
 | `search_brief` | Topic + first matching line per hit |
 | `search_topics` | Which topics matched + hit counts |
 | `search_count` | Just count matches (fastest) |
+| `index_search` | Binary index search (~200ns via C FFI path) |
 
 **Write** — store and modify knowledge
 | Tool | What it does |
@@ -52,17 +53,27 @@ Restart Claude Code. Your agent now has persistent memory.
 | `context` | Session briefing: topics + recent entries |
 | `topics` | List all topics with entry counts |
 | `recent` | Entries from last N days/hours |
-| `read_topic` | Read a full topic file |
+| `read_topic` | Read all entries in a topic |
 | `digest` | One-bullet summary of every entry |
 | `stats` | Topic count, entry count, date range |
 | `list_tags` | All tags with usage counts |
 | `list_entries` | Entries in a topic with index numbers |
 | `get_entry` | Fetch a single entry by topic + index |
 
+**Analysis** — understand knowledge structure
+| Tool | What it does |
+|------|-------------|
+| `reconstruct` | One-shot semantic synthesis: groups entries by category (ARCHITECTURE, INVARIANTS, GOTCHAS, etc.) |
+| `search_entity` | Search grouped by topic — full picture per topic |
+| `dep_graph` | Topic dependency graph: which topics reference which |
+| `xref` | Find cross-references between topics |
+| `check_stale` | Find entries whose source files have changed |
+
 **Edit** — reorganize knowledge
 | Tool | What it does |
 |------|-------------|
-| `rename_topic` | Rename a topic file (preserves entries) |
+| `rename_topic` | Rename a topic (preserves entries) |
+| `merge_topics` | Merge all entries from one topic into another |
 | `tag_entry` | Add or remove tags on an existing entry |
 
 **Maintenance** — keep knowledge clean
@@ -70,24 +81,26 @@ Restart Claude Code. Your agent now has persistent memory.
 |------|-------------|
 | `compact` | Find and merge duplicate entries |
 | `prune` | Flag stale topics (no entries in N days) |
-| `xref` | Find cross-references between topics |
-| `export` / `import` | JSON backup and restore |
 | `migrate` | Fix entries without timestamps |
+| `export` / `import` | JSON backup and restore |
 | `session` | Show what was stored this session |
+| `rebuild_index` | Rebuild binary inverted index |
+| `index_stats` | Show index and cache statistics |
 | `_reload` | Hot-reload binary after code changes |
 
 ## How it works
 
-Knowledge is stored as timestamped markdown entries in topic files:
+Knowledge is stored in a single append-only data log:
 
 ```
 ~/.amaranthine/
-  rust-ffi.md        # 12 entries about Rust FFI patterns
-  build-gotchas.md   # things that bit me once
-  iris-engine.md     # detection pipeline architecture
+  data.log       # all entries + tombstone deletes, single file
+  index.bin      # binary inverted index, rebuilt on write
 ```
 
-Each file is human-readable markdown. No database, no cloud, no lock-in.
+Topics are virtual metadata — each entry has a topic name, but there are no
+per-topic files. Entries are timestamped, tagged, and optionally source-linked.
+Deletes are tombstone records referencing the original entry's byte offset.
 
 Search uses BM25 ranking with CamelCase/snake_case splitting and AND-to-OR
 fallback. Query is optional — browse by topic or tag without specifying one.
@@ -110,6 +123,7 @@ amaranthine delete rust-tips --last        # remove last entry
 
 - Zero runtime dependencies — hand-rolled JSON parser, arg parsing, libc FFI
 - ~640KB stripped binary, <5s release compile
-- All knowledge in `~/.amaranthine/`, override with `--dir` or `AMARANTHINE_DIR`
+- All knowledge in `~/.amaranthine/data.log`, override with `--dir` or `AMARANTHINE_DIR`
 - MCP server speaks JSON-RPC over stdio (`amaranthine serve`)
+- C FFI dylib for ~200ns in-process queries (used by hooks)
 - See [DESIGN.md](DESIGN.md) for architecture decisions

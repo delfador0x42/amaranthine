@@ -1,44 +1,60 @@
-//! Query engine for the binary inverted index.
-//! Designed for mmap'd access: ~200ns per query.
+//! Query engine for the binary inverted index v2.
 //! All reads are pointer arithmetic on a &[u8] slice.
 
-use crate::inverted::*;
+use crate::format::*;
 
-/// Query the binary index. Returns formatted results.
+// --- Formatted search (MCP path) ---
+
 pub fn search(data: &[u8], query: &str, limit: usize) -> Result<String, String> {
-    if data.len() < std::mem::size_of::<Header>() {
-        return Err("index too small".into());
+    let hits = search_v2(data, query, limit)?;
+    if hits.is_empty() { return Ok(format!("0 matches for '{query}'")); }
+    let mut out = String::new();
+    for h in &hits {
+        out.push_str("  ");
+        out.push_str(&h.snippet);
+        out.push('\n');
     }
+    out.push_str(&format!("{} match(es) [index]\n", hits.len()));
+    Ok(out)
+}
+
+// --- Structured search ---
+
+pub struct SearchHit {
+    pub entry_id: u32,
+    pub topic_id: u16,
+    pub score: f64,
+    pub snippet: String,
+    pub date_minutes: i32,
+}
+
+pub fn search_v2(data: &[u8], query: &str, limit: usize) -> Result<Vec<SearchHit>, String> {
     let hdr = read_header(data)?;
-    let terms = query_terms(query);
+    let terms = crate::text::query_terms(query);
     if terms.is_empty() { return Err("empty query".into()); }
 
-    // Copy packed fields to locals (avoids unaligned access UB)
     let num_entries = { hdr.num_entries } as usize;
     let table_cap = { hdr.table_cap } as usize;
     let avgdl = { hdr.avgdl_x100 } as f64 / 100.0;
-    let postings_off = { hdr.postings_off } as usize;
+    let post_off = { hdr.postings_off } as usize;
     let meta_off = { hdr.meta_off } as usize;
-    let snippet_off = { hdr.snippet_off } as usize;
+    let snip_off = { hdr.snippet_off } as usize;
     let mask = table_cap - 1;
 
-    let mut scores: Vec<f64> = vec![0.0; num_entries];
-    let mut matched: Vec<bool> = vec![false; num_entries];
-    let mut any_hit = false;
+    let mut scores = vec![0.0f64; num_entries];
+    let mut matched = vec![false; num_entries];
 
     for term in &terms {
         let h = hash_term(term);
         let mut idx = (h as usize) & mask;
-
         for _ in 0..table_cap {
             let slot = read_slot(data, idx)?;
             let sh = { slot.hash };
             if sh == 0 { break; }
             if sh == h {
-                any_hit = true;
                 let p_off = { slot.postings_off } as usize;
                 let p_len = { slot.postings_len } as usize;
-                let base = postings_off + p_off * std::mem::size_of::<Posting>();
+                let base = post_off + p_off * std::mem::size_of::<Posting>();
                 for i in 0..p_len {
                     let p = read_at::<Posting>(data, base + i * std::mem::size_of::<Posting>())?;
                     let eid = { p.entry_id } as usize;
@@ -58,43 +74,142 @@ pub fn search(data: &[u8], query: &str, limit: usize) -> Result<String, String> 
         }
     }
 
-    if !any_hit {
-        return Ok(format!("0 matches for '{query}'"));
-    }
-
-    // Top-K by score
     let mut results: Vec<(usize, f64)> = scores.iter().enumerate()
-        .filter(|(i, _)| matched[*i])
-        .map(|(i, s)| (i, *s))
-        .collect();
+        .filter(|(i, _)| matched[*i]).map(|(i, s)| (i, *s)).collect();
     results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     results.truncate(limit);
 
-    let mut out = String::new();
-    for (eid, _) in &results {
+    let mut hits = Vec::new();
+    for (eid, score) in results {
         let m = read_at::<EntryMeta>(data, meta_off + eid * std::mem::size_of::<EntryMeta>())?;
-        let s_off = snippet_off + { m.snippet_off } as usize;
+        let s_off = snip_off + { m.snippet_off } as usize;
         let s_len = { m.snippet_len } as usize;
-        if s_off + s_len <= data.len() {
-            if let Ok(s) = std::str::from_utf8(&data[s_off..s_off + s_len]) {
-                out.push_str("  ");
-                out.push_str(s);
-                out.push('\n');
-            }
-        }
+        let snippet = if s_off + s_len <= data.len() {
+            std::str::from_utf8(&data[s_off..s_off + s_len]).unwrap_or("").to_string()
+        } else { String::new() };
+        hits.push(SearchHit {
+            entry_id: eid as u32, topic_id: { m.topic_id }, score,
+            snippet, date_minutes: { m.date_minutes },
+        });
     }
-    let total = results.len();
-    out.push_str(&format!("{total} match(es) [index]\n"));
+    Ok(hits)
+}
+
+// --- V2 section readers ---
+
+pub fn topic_table(data: &[u8]) -> Result<Vec<(u16, String, u16)>, String> {
+    let hdr = read_header(data)?;
+    let top_off = { hdr.topics_off } as usize;
+    let tname_off = { hdr.topic_names_off } as usize;
+    let n = { hdr.num_topics } as usize;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let te = read_at::<TopicEntry>(data, top_off + i * std::mem::size_of::<TopicEntry>())?;
+        let no = tname_off + { te.name_off } as usize;
+        let nl = { te.name_len } as usize;
+        let name = if no + nl <= data.len() {
+            std::str::from_utf8(&data[no..no + nl]).unwrap_or("?").to_string()
+        } else { "?".into() };
+        out.push((i as u16, name, { te.entry_count }));
+    }
     Ok(out)
 }
 
-/// Number of entries in the index.
+pub fn topic_name(data: &[u8], topic_id: u16) -> Result<String, String> {
+    let hdr = read_header(data)?;
+    let top_off = { hdr.topics_off } as usize;
+    let tname_off = { hdr.topic_names_off } as usize;
+    let n = { hdr.num_topics } as usize;
+    if topic_id as usize >= n { return Err("topic_id out of range".into()); }
+    let te = read_at::<TopicEntry>(data, top_off + topic_id as usize * std::mem::size_of::<TopicEntry>())?;
+    let no = tname_off + { te.name_off } as usize;
+    let nl = { te.name_len } as usize;
+    if no + nl > data.len() { return Err("name out of bounds".into()); }
+    Ok(std::str::from_utf8(&data[no..no + nl]).unwrap_or("?").to_string())
+}
+
+pub fn xref_edges(data: &[u8]) -> Result<Vec<(u16, u16, u16)>, String> {
+    let hdr = read_header(data)?;
+    let off = { hdr.xref_off } as usize;
+    let n = { hdr.num_xrefs } as usize;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let x = read_at::<XrefEdge>(data, off + i * std::mem::size_of::<XrefEdge>())?;
+        out.push(({ x.src_topic }, { x.dst_topic }, { x.mention_count }));
+    }
+    Ok(out)
+}
+
+pub struct SourcedHit {
+    pub entry_id: u32,
+    pub topic_id: u16,
+    pub source_path: String,
+    pub date_minutes: i32,
+}
+
+pub fn sourced_entries(data: &[u8]) -> Result<Vec<SourcedHit>, String> {
+    let hdr = read_header(data)?;
+    let meta_off = { hdr.meta_off } as usize;
+    let src_off = { hdr.source_off } as usize;
+    let n = { hdr.num_entries } as usize;
+    let mut out = Vec::new();
+    for i in 0..n {
+        let m = read_at::<EntryMeta>(data, meta_off + i * std::mem::size_of::<EntryMeta>())?;
+        let sl = { m.source_len } as usize;
+        if sl == 0 { continue; }
+        let so = src_off + { m.source_off } as usize;
+        if so + sl > data.len() { continue; }
+        let path = std::str::from_utf8(&data[so..so + sl]).unwrap_or("").to_string();
+        out.push(SourcedHit {
+            entry_id: i as u32, topic_id: { m.topic_id },
+            source_path: path, date_minutes: { m.date_minutes },
+        });
+    }
+    Ok(out)
+}
+
+pub fn entry_log_offset(data: &[u8], entry_id: u32) -> Result<u32, String> {
+    let hdr = read_header(data)?;
+    let meta_off = { hdr.meta_off } as usize;
+    let n = { hdr.num_entries } as usize;
+    if entry_id as usize >= n { return Err("entry_id out of range".into()); }
+    let m = read_at::<EntryMeta>(data, meta_off + entry_id as usize * std::mem::size_of::<EntryMeta>())?;
+    Ok(m.log_offset)
+}
+
+pub fn entries_for_topic(data: &[u8], topic_id: u16) -> Result<Vec<u32>, String> {
+    let hdr = read_header(data)?;
+    let meta_off = { hdr.meta_off } as usize;
+    let n = { hdr.num_entries } as usize;
+    let mut entries: Vec<(u32, i32)> = Vec::new();
+    for i in 0..n {
+        let m = read_at::<EntryMeta>(data, meta_off + i * std::mem::size_of::<EntryMeta>())?;
+        if { m.topic_id } == topic_id {
+            entries.push((i as u32, { m.date_minutes }));
+        }
+    }
+    entries.sort_by_key(|&(_, d)| d);
+    Ok(entries.into_iter().map(|(id, _)| id).collect())
+}
+
+pub fn find_topic_id(data: &[u8], name: &str) -> Result<u16, String> {
+    let topics = topic_table(data)?;
+    topics.iter().find(|(_, n, _)| n == name)
+        .map(|(id, _, _)| *id)
+        .ok_or_else(|| format!("topic '{}' not found in index", name))
+}
+
+pub fn index_version(data: &[u8]) -> Result<u32, String> {
+    if data.len() < 8 { return Err("too small".into()); }
+    let v = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+    Ok(v)
+}
+
 pub fn entry_count(data: &[u8]) -> Result<usize, String> {
     let hdr = read_header(data)?;
     Ok({ hdr.num_entries } as usize)
 }
 
-/// Stats about the loaded index.
 pub fn index_info(data: &[u8]) -> Result<String, String> {
     let hdr = read_header(data)?;
     let ne = { hdr.num_entries };
@@ -102,159 +217,28 @@ pub fn index_info(data: &[u8]) -> Result<String, String> {
     let tc = { hdr.table_cap };
     let ad = { hdr.avgdl_x100 } as f64 / 100.0;
     let tl = { hdr.total_len };
-    Ok(format!("index: {ne} entries, {nt} terms, table_cap={tc}, avgdl={ad:.1}, {tl} bytes"))
+    let ntop = { hdr.num_topics };
+    let nxr = { hdr.num_xrefs };
+    Ok(format!("index v2: {ne} entries, {nt} terms, {ntop} topics, {nxr} xrefs, table_cap={tc}, avgdl={ad:.1}, {tl} bytes"))
 }
 
-// --- Low-level readers ---
+// --- Low-level readers (pub for cffi.rs) ---
 
-fn read_header(data: &[u8]) -> Result<Header, String> {
+pub fn read_header(data: &[u8]) -> Result<Header, String> {
+    if data.len() < std::mem::size_of::<Header>() { return Err("index too small".into()); }
     let hdr: Header = unsafe { std::ptr::read_unaligned(data.as_ptr() as *const Header) };
     if hdr.magic != MAGIC { return Err("bad index magic".into()); }
     let v = { hdr.version };
-    if v != VERSION { return Err(format!("index version {v} != {VERSION}")); }
+    if v != VERSION { return Err(format!("index version {v} != {VERSION} — run rebuild_index")); }
     Ok(hdr)
 }
 
-fn read_slot(data: &[u8], idx: usize) -> Result<TermSlot, String> {
+pub fn read_slot(data: &[u8], idx: usize) -> Result<TermSlot, String> {
     let off = std::mem::size_of::<Header>() + idx * std::mem::size_of::<TermSlot>();
     read_at::<TermSlot>(data, off)
 }
 
-fn read_at<T: Copy>(data: &[u8], off: usize) -> Result<T, String> {
-    if off + std::mem::size_of::<T>() > data.len() {
-        return Err("read out of bounds".into());
-    }
+pub fn read_at<T: Copy>(data: &[u8], off: usize) -> Result<T, String> {
+    if off + std::mem::size_of::<T>() > data.len() { return Err("read out of bounds".into()); }
     Ok(unsafe { std::ptr::read_unaligned(data.as_ptr().add(off) as *const T) })
-}
-
-fn query_terms(query: &str) -> Vec<String> {
-    query.split_whitespace()
-        .map(|w| w.to_lowercase())
-        .filter(|w| !w.is_empty())
-        .collect()
-}
-
-// --- Zero-alloc search path ---
-
-/// Result struct for zero-alloc search. C-compatible.
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub struct RawResult {
-    pub entry_id: u16,
-    pub score_x1000: u32,
-}
-
-/// Reusable query state. Pre-allocated, never freed between queries.
-pub struct QueryState {
-    pub generation: u32,
-    pub entry_gen: Vec<u32>,
-    pub scores: Vec<f64>,
-}
-
-impl QueryState {
-    pub fn new(num_entries: usize) -> Self {
-        Self { generation: 0, entry_gen: vec![0; num_entries], scores: vec![0.0; num_entries] }
-    }
-    fn ensure(&mut self, n: usize) {
-        if self.entry_gen.len() < n {
-            self.entry_gen.resize(n, 0);
-            self.scores.resize(n, 0.0);
-        }
-    }
-}
-
-/// Zero-alloc search with pre-hashed terms. Writes results to `out`.
-/// Returns number of results written. No heap allocation on hot path.
-pub fn search_raw(
-    data: &[u8], hashes: &[u64], state: &mut QueryState, out: &mut [RawResult],
-) -> Result<usize, String> {
-    let hdr = read_header(data)?;
-    let num_entries = { hdr.num_entries } as usize;
-    let table_cap = { hdr.table_cap } as usize;
-    let avgdl = { hdr.avgdl_x100 } as f64 / 100.0;
-    let postings_off = { hdr.postings_off } as usize;
-    let meta_off = { hdr.meta_off } as usize;
-    let mask = table_cap - 1;
-
-    state.ensure(num_entries);
-    state.generation = state.generation.wrapping_add(1);
-    if state.generation == 0 { state.generation = 1; }
-    let gen = state.generation;
-
-    let mut any_hit = false;
-    for &h in hashes {
-        let mut idx = (h as usize) & mask;
-        for _ in 0..table_cap {
-            let slot = read_slot(data, idx)?;
-            let sh = { slot.hash };
-            if sh == 0 { break; }
-            if sh == h {
-                any_hit = true;
-                let p_off = { slot.postings_off } as usize;
-                let p_len = { slot.postings_len } as usize;
-                let base = postings_off + p_off * std::mem::size_of::<Posting>();
-                for i in 0..p_len {
-                    let p = read_at::<Posting>(data, base + i * std::mem::size_of::<Posting>())?;
-                    let eid = { p.entry_id } as usize;
-                    if eid >= num_entries { continue; }
-                    if state.entry_gen[eid] != gen {
-                        state.scores[eid] = 0.0;
-                        state.entry_gen[eid] = gen;
-                    }
-                    let m = read_at::<EntryMeta>(data, meta_off + eid * std::mem::size_of::<EntryMeta>())?;
-                    let doc_len = { m.word_count } as f64;
-                    let idf = { p.idf_x1000 } as f64 / 1000.0;
-                    let tf = { p.tf } as f64;
-                    let len_norm = 1.0 - 0.75 + 0.75 * doc_len / avgdl.max(1.0);
-                    let tf_sat = (tf * 2.2) / (tf + 1.2 * len_norm);
-                    state.scores[eid] += idf * tf_sat;
-                }
-                break;
-            }
-            idx = (idx + 1) & mask;
-        }
-    }
-
-    if !any_hit { return Ok(0); }
-
-    // Insertion-sort top-K into output buffer
-    let limit = out.len();
-    let mut n = 0usize;
-    for eid in 0..num_entries {
-        if state.entry_gen[eid] != gen { continue; }
-        let s = (state.scores[eid] * 1000.0) as u32;
-        if n < limit {
-            let mut pos = n;
-            while pos > 0 && out[pos - 1].score_x1000 < s {
-                out[pos] = out[pos - 1];
-                pos -= 1;
-            }
-            out[pos] = RawResult { entry_id: eid as u16, score_x1000: s };
-            n += 1;
-        } else if s > out[n - 1].score_x1000 {
-            let mut pos = n - 1;
-            while pos > 0 && out[pos - 1].score_x1000 < s {
-                out[pos] = out[pos - 1];
-                pos -= 1;
-            }
-            out[pos] = RawResult { entry_id: eid as u16, score_x1000: s };
-        }
-    }
-    Ok(n)
-}
-
-/// Get snippet for an entry_id. Returns (ptr, len) into index data.
-/// Valid until the data slice is freed/reloaded.
-pub fn snippet<'a>(data: &'a [u8], entry_id: u16) -> Option<&'a str> {
-    let hdr = read_header(data).ok()?;
-    let num_entries = { hdr.num_entries } as usize;
-    let meta_off = { hdr.meta_off } as usize;
-    let snippet_off = { hdr.snippet_off } as usize;
-    let eid = entry_id as usize;
-    if eid >= num_entries { return None; }
-    let m = read_at::<EntryMeta>(data, meta_off + eid * std::mem::size_of::<EntryMeta>()).ok()?;
-    let s_off = snippet_off + { m.snippet_off } as usize;
-    let s_len = { m.snippet_len } as usize;
-    if s_off + s_len > data.len() { return None; }
-    std::str::from_utf8(&data[s_off..s_off + s_len]).ok()
 }

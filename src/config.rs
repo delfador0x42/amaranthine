@@ -91,6 +91,16 @@ pub fn check_staleness(source: &str, entry_header: &str) -> Option<String> {
     }
 }
 
+/// Path to the append-only data log.
+pub fn log_path(dir: &Path) -> PathBuf {
+    dir.join("data.log")
+}
+
+/// Check if data.log exists in the directory.
+pub fn data_log_exists(dir: &Path) -> bool {
+    dir.join("data.log").exists()
+}
+
 fn list_md_files(dir: &Path, exclude: &[&str]) -> Result<Vec<PathBuf>, String> {
     let entries = fs::read_dir(dir).map_err(|e| e.to_string())?;
     let mut files: Vec<PathBuf> = entries

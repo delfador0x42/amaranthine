@@ -1,61 +1,39 @@
 use std::fmt::Write;
-use std::fs;
 use std::path::Path;
 
-/// Scan for entries without proper timestamps and optionally fix them.
+/// Scan data.log for entries without timestamps (timestamp_min == 0).
+/// Optionally fix by re-appending with current timestamp + tombstoning old.
 pub fn run(dir: &Path, apply: bool) -> Result<String, String> {
-    let files = crate::config::list_topic_files(dir)?;
+    let log_path = crate::config::log_path(dir);
+    if !log_path.exists() { return Ok("no data.log found\n".into()); }
+    let entries = crate::datalog::iter_live(&log_path)?;
+
     let mut out = String::new();
-    let mut total_fixed = 0;
+    let mut total = 0;
 
-    for path in &files {
-        let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let name = path.file_stem().unwrap().to_string_lossy().to_string();
-        let mut needs_fix = false;
+    for e in &entries {
+        if e.timestamp_min != 0 { continue; }
+        let preview = e.body.lines()
+            .find(|l| !l.trim().is_empty() && !l.starts_with("[tags:"))
+            .map(|l| { let t = l.trim(); if t.len() > 60 { &t[..60] } else { t } })
+            .unwrap_or("(empty)");
+        let _ = writeln!(out, "  [{}] no timestamp: {preview}", e.topic);
+        total += 1;
 
-        for line in content.lines() {
-            if line.starts_with("## ") {
-                let rest = line.trim_start_matches("## ");
-                if crate::time::parse_date_days(rest).is_none() {
-                    needs_fix = true;
-                    let _ = writeln!(out, "  [{name}] bad header: {line}");
-                }
-            }
-        }
-
-        if needs_fix && apply {
-            let now = crate::time::LocalTime::now();
-            let fixed = fix_timestamps(&content, &format!("{now}"));
-            crate::config::atomic_write(path, &fixed)?;
-            total_fixed += 1;
-            let _ = writeln!(out, "  [{name}] fixed timestamps");
+        if apply {
+            let ts = crate::time::LocalTime::now().to_minutes() as i32;
+            crate::datalog::append_entry(&log_path, &e.topic, &e.body, ts)?;
+            crate::datalog::append_delete(&log_path, e.offset)?;
         }
     }
 
-    if out.is_empty() {
+    if total == 0 {
         let _ = writeln!(out, "all entries have valid timestamps");
     } else if !apply {
-        let _ = writeln!(out, "\nrun with apply=true to backfill timestamps");
+        let _ = writeln!(out, "\n{total} entries without timestamps");
+        let _ = writeln!(out, "run with apply=true to backfill with current time");
     } else {
-        let _ = writeln!(out, "\nfixed {total_fixed} topic(s)");
+        let _ = writeln!(out, "\nfixed {total} entries with current timestamp");
     }
     Ok(out)
-}
-
-fn fix_timestamps(content: &str, fallback: &str) -> String {
-    let mut result = String::new();
-    for line in content.lines() {
-        if line.starts_with("## ") {
-            let rest = line.trim_start_matches("## ");
-            if crate::time::parse_date_days(rest).is_none() {
-                // Preserve original text as first line of body, add timestamp
-                result.push_str(&format!("## {fallback}\n"));
-                result.push_str(&format!("{rest}\n"));
-                continue;
-            }
-        }
-        result.push_str(line);
-        result.push('\n');
-    }
-    result
 }
