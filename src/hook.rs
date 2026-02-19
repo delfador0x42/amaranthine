@@ -56,13 +56,53 @@ fn ambient(input: &Value, dir: &Path) -> Result<String, String> {
     let structural = crate::binquery::search(&data, &structural_query, 3).unwrap_or_default();
     let has_structural = !structural.is_empty() && !structural.starts_with("0 match");
 
-    if !has_results && !has_structural { return Ok(String::new()); }
+    // Edit-aware: detect removed/renamed symbols and surface coupling
+    let mut refactor_context = String::new();
+    if tool == "Edit" {
+        let ti = input.get("tool_input");
+        let old = ti.and_then(|t| t.get("old_string")).and_then(|v| v.as_str()).unwrap_or("");
+        let new_str = ti.and_then(|t| t.get("new_string")).and_then(|v| v.as_str()).unwrap_or("");
+        if old.len() >= 8 {
+            let extract = |s: &str| -> std::collections::HashSet<String> {
+                s.split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .filter(|w| w.len() >= 4 && w.bytes().any(|b| b.is_ascii_alphabetic()))
+                    .map(|w| w.to_lowercase())
+                    .collect()
+            };
+            let old_tokens: std::collections::HashSet<String> = extract(old)
+                .into_iter().filter(|t| t != stem).collect();
+            let new_tokens: std::collections::HashSet<String> = extract(new_str);
+            let mut removed: Vec<&str> = old_tokens.iter()
+                .filter(|t| !new_tokens.contains(*t))
+                .map(|s| s.as_str()).collect();
+            removed.sort();
+            removed.truncate(3);
+            if !removed.is_empty() {
+                let syms = removed.join(", ");
+                refactor_context.push_str(
+                    &format!("\nREFACTOR IMPACT (symbols modified: {syms}):\n"));
+                for sym in &removed {
+                    let hits = crate::binquery::search(&data, sym, 3).unwrap_or_default();
+                    if !hits.is_empty() && !hits.starts_with("0 match") {
+                        refactor_context.push_str(&hits);
+                    }
+                }
+            }
+        }
+    }
+
+    let has_refactor = !refactor_context.is_empty();
+    if !has_results && !has_structural && !has_refactor { return Ok(String::new()); }
 
     let mut out = String::new();
     if has_results { out.push_str(&format!("amaranthine entries for {stem}:\n{results}")); }
     if has_structural {
         if has_results { out.push_str("\n---\n"); }
         out.push_str(&format!("structural coupling:\n{structural}"));
+    }
+    if has_refactor {
+        if has_results || has_structural { out.push_str("\n---\n"); }
+        out.push_str(&refactor_context);
     }
     Ok(hook_output(&out))
 }

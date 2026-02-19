@@ -42,7 +42,7 @@ pub fn append_entry(log_path: &Path, topic: &str, body: &str, ts_min: i32) -> Re
     f.write_all(&hdr).map_err(|e| e.to_string())?;
     f.write_all(tb).map_err(|e| e.to_string())?;
     f.write_all(bb).map_err(|e| e.to_string())?;
-    f.sync_all().map_err(|e| e.to_string())?;
+    f.sync_data().map_err(|e| e.to_string())?;
     Ok(offset)
 }
 
@@ -54,7 +54,7 @@ pub fn append_delete(log_path: &Path, target_offset: u32) -> Result<(), String> 
     rec[0] = 0x02;
     rec[4..8].copy_from_slice(&target_offset.to_le_bytes());
     f.write_all(&rec).map_err(|e| e.to_string())?;
-    f.sync_all().map_err(|e| e.to_string())?;
+    f.sync_data().map_err(|e| e.to_string())?;
     Ok(())
 }
 

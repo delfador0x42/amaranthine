@@ -71,9 +71,9 @@ fn refs_via_corpus(dir: &Path, filename: &str) -> Result<String, String> {
 
         for e in cached {
             if e.topic == filename { continue; }
-            // Check if all tokens of the topic name appear in this entry's token_set
+            // Check if all tokens of the topic name appear in this entry's tf_map
             let all_match = !search_tokens.is_empty()
-                && search_tokens.iter().all(|t| e.token_set.contains(*t));
+                && search_tokens.iter().all(|t| e.tf_map.contains_key(*t));
             if all_match {
                 let preview = e.body.lines()
                     .find(|l| !l.starts_with("[tags:") && !l.starts_with("[source:") && !l.starts_with("[confidence:") && !l.starts_with("[links:") && !l.trim().is_empty())

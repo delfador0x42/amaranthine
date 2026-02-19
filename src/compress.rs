@@ -57,9 +57,11 @@ pub fn first_content(body: &str) -> &str {
 /// Cross-topic dedup: identical first content lines → merge with provenance.
 fn dedup(entries: &mut Vec<Compressed>) {
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (i, e) in entries.iter().enumerate() {
-        let key = first_content(&e.body).to_lowercase();
-        if key.len() >= 10 { groups.entry(key).or_default().push(i); }
+    // Pre-compute lowercased first-content keys once instead of per-comparison
+    let keys: Vec<String> = entries.iter()
+        .map(|e| first_content(&e.body).to_lowercase()).collect();
+    for (i, key) in keys.iter().enumerate() {
+        if key.len() >= 10 { groups.entry(key.clone()).or_default().push(i); }
     }
     let mut remove = Vec::new();
     for indices in groups.values() {

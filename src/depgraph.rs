@@ -76,11 +76,11 @@ fn run_via_corpus(dir: &Path) -> Result<String, String> {
         for e in entries {
             for target in &names {
                 if *target == e.topic.as_str() { continue; }
-                // Use token_set for matching instead of body.to_lowercase()
+                // Use tf_map for matching instead of body.to_lowercase()
                 let target_tokens = crate::text::tokenize(target);
                 let all_match = target_tokens.iter()
                     .filter(|t| t.len() >= 2)
-                    .all(|t| e.token_set.contains(t));
+                    .all(|t| e.tf_map.contains_key(t));
                 if all_match && !target_tokens.is_empty() {
                     *outgoing.entry(e.topic.as_str()).or_default()
                         .entry(target).or_insert(0) += 1;

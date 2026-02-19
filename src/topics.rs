@@ -7,6 +7,21 @@ pub fn list(dir: &Path) -> Result<String, String> {
 }
 
 pub fn list_compact(dir: &Path) -> Result<String, String> {
+    // Fast path: read topic table from binary index (zero corpus scan)
+    let from_index = crate::mcp::with_index(|data| {
+        crate::binquery::topic_table(data).ok()
+    }).flatten().or_else(|| {
+        std::fs::read(dir.join("index.bin")).ok()
+            .and_then(|data| crate::binquery::topic_table(&data).ok())
+    });
+    if let Some(topics) = from_index {
+        let mut out = String::new();
+        for (_, name, count) in &topics {
+            let _ = writeln!(out, "  {:<24} {:>3} entries", name, count);
+        }
+        return Ok(out);
+    }
+    // Fallback: corpus scan
     list_inner(dir, true)
 }
 

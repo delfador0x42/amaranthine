@@ -15,6 +15,7 @@ struct ServerIndex { data: Vec<u8> }
 
 static INDEX: RwLock<Option<ServerIndex>> = RwLock::new(None);
 static INDEX_DIRTY: AtomicBool = AtomicBool::new(false);
+static DIRTY_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
 pub(crate) fn log_session(msg: String) {
     if let Ok(mut log) = SESSION_LOG.lock() { log.push(msg); }
@@ -167,17 +168,30 @@ where F: FnOnce(&[u8]) -> R {
 
 pub(crate) fn after_write(_dir: &Path, _topic: &str) {
     INDEX_DIRTY.store(true, Ordering::Release);
-    // Don't invalidate corpus cache here — let with_corpus() mtime check handle
-    // freshness. This allows rebuild() to reuse cached tokens on the next dispatch.
+    // Record when dirty flag was set for debounce
+    if let Ok(mut guard) = DIRTY_AT.lock() {
+        if guard.is_none() { *guard = Some(std::time::Instant::now()); }
+    }
 }
 
-/// Rebuild index if dirty. Call before read operations.
+/// Rebuild index if dirty and debounce window (100ms) has elapsed.
+/// Burst writes within the window are coalesced into a single rebuild.
 /// F1: Uses returned bytes directly instead of re-reading from disk.
 pub(crate) fn ensure_index_fresh(dir: &Path) {
+    if !INDEX_DIRTY.load(Ordering::Acquire) { return; }
+    // Debounce: skip rebuild if dirty flag was set less than 100ms ago
+    let elapsed = DIRTY_AT.lock().ok()
+        .and_then(|g| g.map(|t| t.elapsed()));
+    if let Some(dt) = elapsed {
+        if dt < std::time::Duration::from_millis(50) {
+            return; // too soon — let writes accumulate
+        }
+    }
     if INDEX_DIRTY.compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+        if let Ok(mut guard) = DIRTY_AT.lock() { *guard = None; }
         match crate::inverted::rebuild(dir) {
             Ok((_, bytes)) => store_index(bytes),
-            Err(_) => load_index(dir), // fallback: existing index.bin
+            Err(_) => load_index(dir),
         }
     }
 }

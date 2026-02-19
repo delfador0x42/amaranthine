@@ -113,6 +113,21 @@ pub fn search_v2_or(
     search_v2_core(data, query, filter, limit, false)
 }
 
+/// Min-heap entry for top-K selection. O(n log k) vs O(n × k) insertion sort.
+struct HeapHit { score: f64, hit: SearchHit }
+impl PartialEq for HeapHit {
+    fn eq(&self, other: &Self) -> bool { self.score.to_bits() == other.score.to_bits() }
+}
+impl Eq for HeapHit {}
+impl PartialOrd for HeapHit {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+}
+impl Ord for HeapHit {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.score.partial_cmp(&other.score).unwrap_or(std::cmp::Ordering::Equal)
+    }
+}
+
 fn search_v2_core(
     data: &[u8], query: &str, filter: &FilterPred, limit: usize, require_all: bool,
 ) -> Result<Vec<SearchHit>, String> {
@@ -198,14 +213,15 @@ fn search_v2_core(
 
     if !any_hit { return Ok(Vec::new()); }
 
-    // Collect results: insertion sort top-K with diversity cap
-    let mut results: Vec<SearchHit> = Vec::with_capacity(limit);
-    let mut topic_counts = [0u8; 256]; // per-topic diversity counter
+    // Collect results: min-heap top-K with diversity cap — O(n log k)
+    use std::collections::BinaryHeap;
+    use std::cmp::Reverse;
+    let mut heap: BinaryHeap<Reverse<HeapHit>> = BinaryHeap::with_capacity(limit + 1);
+    let mut topic_counts = [0u8; 256];
     let diversity_cap: u8 = 3;
 
     for eid in 0..num_entries {
         if state.entry_gen[eid] != gen { continue; }
-        // AND mode: require all terms; OR mode: require at least one
         let min_hits = if require_all { num_terms } else { 1 };
         if state.hit_count[eid] < min_hits { continue; }
 
@@ -215,9 +231,9 @@ fn search_v2_core(
         let m = read_at::<EntryMeta>(data, meta_off + eid * std::mem::size_of::<EntryMeta>())?;
         let tid = { m.topic_id } as usize;
 
-        // Diversity cap: if topic already has `cap` results and we're full, require 1.5x min score
-        if results.len() >= limit && tid < topic_counts.len() && topic_counts[tid] >= diversity_cap {
-            let min_score = results.last().map(|r| r.score).unwrap_or(0.0);
+        // Diversity cap: if topic already has `cap` results and heap full, require 1.5x min score
+        if heap.len() >= limit && tid < topic_counts.len() && topic_counts[tid] >= diversity_cap {
+            let min_score = heap.peek().map(|r| r.0.score).unwrap_or(0.0);
             if score <= min_score * 1.5 { continue; }
         }
 
@@ -234,20 +250,22 @@ fn search_v2_core(
             log_offset: { m.log_offset },
         };
 
-        // Insertion sort into top-K
-        if results.len() < limit {
-            let pos = results.iter().position(|r| r.score < score).unwrap_or(results.len());
-            results.insert(pos, hit);
+        // Min-heap top-K: push or replace min
+        if heap.len() < limit {
+            heap.push(Reverse(HeapHit { score, hit }));
             if tid < topic_counts.len() { topic_counts[tid] = topic_counts[tid].saturating_add(1); }
-        } else if score > results.last().map(|r| r.score).unwrap_or(0.0) {
-            let evicted = results.pop().unwrap();
-            let etid = evicted.topic_id as usize;
+        } else if score > heap.peek().map(|r| r.0.score).unwrap_or(0.0) {
+            let evicted = heap.pop().unwrap().0;
+            let etid = evicted.hit.topic_id as usize;
             if etid < topic_counts.len() { topic_counts[etid] = topic_counts[etid].saturating_sub(1); }
-            let pos = results.iter().position(|r| r.score < score).unwrap_or(results.len());
-            results.insert(pos, hit);
+            heap.push(Reverse(HeapHit { score, hit }));
             if tid < topic_counts.len() { topic_counts[tid] = topic_counts[tid].saturating_add(1); }
         }
     }
+    // Drain heap → sorted descending by score
+    let mut results: Vec<SearchHit> = heap.into_vec()
+        .into_iter().map(|r| r.0.hit).collect();
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     Ok(results)
 }
 

@@ -167,13 +167,13 @@ fn singularize(s: &str) -> String {
 
 fn check_dupe(dir: &Path, topic: &str, new_text: &str) -> Option<String> {
     crate::cache::with_corpus(dir, |cached| {
-        // F7: Use cached token_set for Jaccard similarity instead of body.to_lowercase
+        // F7: Use cached tf_map for Jaccard similarity instead of body.to_lowercase
         let new_tokens: std::collections::HashSet<String> = crate::text::tokenize(new_text)
             .into_iter().filter(|t| t.len() >= 3).collect();
         if new_tokens.len() < 6 { return None; }
         for e in cached.iter().filter(|e| e.topic == topic) {
-            let intersection = new_tokens.iter().filter(|t| e.token_set.contains(*t)).count();
-            let union = new_tokens.len() + e.token_set.len() - intersection;
+            let intersection = new_tokens.iter().filter(|t| e.tf_map.contains_key(*t)).count();
+            let union = new_tokens.len() + e.tf_map.len() - intersection;
             if union > 0 && intersection as f64 / union as f64 > 0.70 {
                 let preview = e.body.trim().lines()
                     .find(|l| !l.starts_with('[') && !l.trim().is_empty())

@@ -2,7 +2,6 @@
 //! Layout: [Header][TermTable][Postings][EntryMeta][Snippets]
 //!         [TopicTable][TopicNames][SourcePool][XrefTable]
 
-use std::collections::HashMap;
 use std::path::Path;
 use crate::format::*;
 use crate::fxhash::{FxHashMap, FxHashSet};
@@ -21,25 +20,28 @@ struct EntryInfo {
 }
 
 pub struct IndexBuilder {
-    terms: HashMap<String, Vec<(u32, u16)>>,
+    terms: FxHashMap<String, Vec<(u32, u16)>>,
     entries: Vec<EntryInfo>,
     topics: Vec<String>,
+    topic_index: FxHashMap<String, u16>,
     total_words: usize,
-    tag_freq: HashMap<String, usize>,
+    tag_freq: FxHashMap<String, usize>,
 }
 
 impl IndexBuilder {
     pub fn new() -> Self {
-        Self { terms: HashMap::new(), entries: Vec::new(), topics: Vec::new(), total_words: 0, tag_freq: HashMap::new() }
+        Self {
+            terms: FxHashMap::default(), entries: Vec::new(), topics: Vec::new(),
+            topic_index: FxHashMap::default(), total_words: 0, tag_freq: FxHashMap::default(),
+        }
     }
 
     pub fn add_topic(&mut self, name: &str) -> u16 {
-        if let Some(i) = self.topics.iter().position(|t| t == name) {
-            return i as u16;
-        }
-        let i = self.topics.len() as u16;
+        if let Some(&id) = self.topic_index.get(name) { return id; }
+        let id = self.topics.len() as u16;
+        self.topic_index.insert(name.to_string(), id);
         self.topics.push(name.to_string());
-        i
+        id
     }
 
     pub fn add_entry(
@@ -172,7 +174,7 @@ impl IndexBuilder {
 
         // Snippet pool + source pool + entry metadata
         // F6: Cache fs::metadata calls for compute_confidence
-        let mut mtime_cache: HashMap<String, Option<std::time::SystemTime>> = HashMap::new();
+        let mut mtime_cache: FxHashMap<String, Option<std::time::SystemTime>> = FxHashMap::default();
         let mut snippets = Vec::<u8>::new();
         let mut sources = Vec::<u8>::new();
         let mut metas = Vec::<EntryMeta>::new();
@@ -360,7 +362,7 @@ fn extract_entry_tags(body: &str) -> Vec<String> {
 /// F6: Cached variant — one stat() per unique source path instead of per entry.
 fn compute_confidence_cached(
     source: &str, date_minutes: i32,
-    cache: &mut HashMap<String, Option<std::time::SystemTime>>,
+    cache: &mut FxHashMap<String, Option<std::time::SystemTime>>,
 ) -> u8 {
     if source.is_empty() { return 255; }
     let path = source.split(':').next().unwrap_or(source);

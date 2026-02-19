@@ -2,7 +2,7 @@
 //! Eliminates file I/O + tokenization on repeated corpus-path searches.
 //! Cache holds pre-tokenized entries; filters applied at query time.
 
-use crate::fxhash::{FxHashSet, FxHashMap};
+use crate::fxhash::FxHashMap;
 use crate::intern::InternedStr;
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -14,7 +14,6 @@ pub struct CachedEntry {
     pub timestamp_min: i32,
     pub offset: u32,
     pub tokens: Vec<String>,
-    pub token_set: FxHashSet<String>,
     pub tf_map: FxHashMap<String, usize>,
     pub word_count: usize,
     pub tags_raw: Option<String>,
@@ -103,8 +102,6 @@ where F: FnOnce(&[CachedEntry]) -> R {
         // Single-pass: build tf_map from tokens (one clone per unique token)
         let mut tf_map: FxHashMap<String, usize> = crate::fxhash::map_with_capacity(word_count / 2);
         for t in &tokens { *tf_map.entry(t.clone()).or_insert(0) += 1; }
-        // Derive token_set from tf_map keys (zero extra String allocs)
-        let token_set: FxHashSet<String> = tf_map.keys().cloned().collect();
         let tags_raw = e.body.lines()
             .find(|l| l.starts_with("[tags: "))
             .map(|l| l.to_string());
@@ -119,7 +116,7 @@ where F: FnOnce(&[CachedEntry]) -> R {
             body: e.body.clone(),
             timestamp_min: e.timestamp_min,
             offset: e.offset,
-            tokens, token_set, tf_map, word_count, tags_raw, confidence, links,
+            tokens, tf_map, word_count, tags_raw, confidence, links,
         });
     }
 

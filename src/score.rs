@@ -36,13 +36,13 @@ impl Filter {
     }
 }
 
-/// Check if tokens match query terms in given mode. O(terms) via HashSet.
+/// Check if tokens match query terms in given mode. O(terms) via HashMap key lookup.
 #[inline]
-pub fn matches_tokens(token_set: &FxHashSet<String>, terms: &[String], mode: SearchMode) -> bool {
+pub fn matches_tokens(tf_map: &FxHashMap<String, usize>, terms: &[String], mode: SearchMode) -> bool {
     if terms.is_empty() { return true; }
     match mode {
-        SearchMode::And => terms.iter().all(|t| token_set.contains(t)),
-        SearchMode::Or => terms.iter().any(|t| token_set.contains(t)),
+        SearchMode::And => terms.iter().all(|t| tf_map.contains_key(t)),
+        SearchMode::Or => terms.iter().any(|t| tf_map.contains_key(t)),
     }
 }
 
@@ -53,7 +53,7 @@ fn score_cached_mode(entries: &[&crate::cache::CachedEntry], terms: &[String],
     -> Vec<ScoredResult>
 {
     entries.iter()
-        .filter(|e| matches_tokens(&e.token_set, terms, mode))
+        .filter(|e| matches_tokens(&e.tf_map, terms, mode))
         .filter_map(|e| {
             let len_norm = 1.0 - BM25_B + BM25_B * e.word_count as f64 / avgdl.max(1.0);
             let mut score = 0.0;
@@ -94,7 +94,7 @@ fn score_on_cache(dir: &Path, terms: &[String], filter: &Filter)
         let total_words: usize = filtered.iter().map(|e| e.word_count).sum();
         let avgdl = if filtered.is_empty() { 1.0 } else { total_words as f64 / n };
         let dfs: Vec<usize> = terms.iter()
-            .map(|t| filtered.iter().filter(|e| e.token_set.contains(t)).count()).collect();
+            .map(|t| filtered.iter().filter(|e| e.tf_map.contains_key(t)).count()).collect();
         let mut results = score_cached_mode(&filtered, terms, filter.mode, n, avgdl, &dfs);
         let mut fallback = false;
         if results.is_empty() && filter.mode == SearchMode::And && terms.len() >= 2 {
@@ -114,11 +114,11 @@ pub fn topic_matches_cached(dir: &Path, terms: &[String], filter: &Filter)
 {
     crate::cache::with_corpus(dir, |cached| {
         let count_fn = |mode: SearchMode| -> Vec<(String, usize)> {
-            let mut hits: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+            let mut hits: FxHashMap<&str, usize> = FxHashMap::default();
             for e in cached {
                 if let Some(ref t) = filter.topic { if e.topic != *t { continue; } }
                 if !passes_filter_cached(e, filter) { continue; }
-                if matches_tokens(&e.token_set, terms, mode) {
+                if matches_tokens(&e.tf_map, terms, mode) {
                     *hits.entry(&e.topic).or_insert(0) += 1;
                 }
             }
@@ -145,7 +145,7 @@ pub fn count_on_cache(dir: &Path, terms: &[String], filter: &Filter)
             for e in cached {
                 if let Some(ref t) = filter.topic { if e.topic != *t { continue; } }
                 if !passes_filter_cached(e, filter) { continue; }
-                if matches_tokens(&e.token_set, terms, mode) {
+                if matches_tokens(&e.tf_map, terms, mode) {
                     total += 1;
                     topics.insert(&e.topic);
                 }
@@ -216,7 +216,7 @@ fn score_via_index(dir: &Path, index_data: &[u8], terms: &[String],
     -> Result<(Vec<ScoredResult>, bool), String>
 {
     let pred = build_filter_pred(index_data, filter);
-    let index_limit = limit.unwrap_or(200).max(100);
+    let index_limit = limit.unwrap_or(20);
     let query_str = terms.join(" ");
     let hits = crate::binquery::search_v2_filtered(index_data, &query_str, &pred, index_limit)?;
 
@@ -320,7 +320,7 @@ fn hydrate_index_hits(dir: &Path, index_data: &[u8], terms: &[String],
 /// Collect all tags from cache for no-match suggestions.
 pub fn collect_all_tags(dir: &Path) -> Vec<(String, usize)> {
     crate::cache::with_corpus(dir, |cached| {
-        let mut tags: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        let mut tags: FxHashMap<String, usize> = FxHashMap::default();
         for e in cached {
             for t in e.tags() {
                 *tags.entry(t.to_string()).or_insert(0) += 1;

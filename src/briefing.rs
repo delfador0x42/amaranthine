@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use crate::compress::{Compressed, first_content};
+use crate::fxhash::FxHashSet;
 
 const CATEGORIES: &[(&str, &[&str])] = &[
     ("ARCHITECTURE", &["architecture", "module-map", "overview", "dependency-graph"]),
@@ -54,15 +55,23 @@ fn write_topics(out: &mut String, entries: &[Compressed], primary: &[String]) {
 
 fn write_graph(out: &mut String, entries: &[Compressed], primary: &[String]) {
     if primary.len() < 2 { return; }
-    let mut edges: Vec<(String, String, usize)> = Vec::new();
+    // Pre-group entries by topic to avoid repeated full scans
+    let mut by_topic: BTreeMap<&str, Vec<&Compressed>> = BTreeMap::new();
+    for e in entries {
+        if primary.iter().any(|p| p == &e.topic) {
+            by_topic.entry(&e.topic).or_default().push(e);
+        }
+    }
+    let mut edges: Vec<(&str, &str, usize)> = Vec::new();
     for src in primary {
+        let src_entries = match by_topic.get(src.as_str()) {
+            Some(v) => v,
+            None => continue,
+        };
         for tgt in primary {
             if src == tgt { continue; }
-            let refs: usize = entries.iter()
-                .filter(|e| e.topic == *src)
-                .map(|e| count_ci(&e.body, tgt))
-                .sum();
-            if refs > 0 { edges.push((src.clone(), tgt.clone(), refs)); }
+            let refs: usize = src_entries.iter().map(|e| count_ci(&e.body, tgt)).sum();
+            if refs > 0 { edges.push((src, tgt, refs)); }
         }
     }
     edges.sort_by(|a, b| b.2.cmp(&a.2));
@@ -75,22 +84,22 @@ fn write_graph(out: &mut String, entries: &[Compressed], primary: &[String]) {
     }
 }
 
-fn write_categories(out: &mut String, entries: &[Compressed]) -> Vec<usize> {
-    let mut used = Vec::new();
+fn write_categories(out: &mut String, entries: &[Compressed]) -> FxHashSet<usize> {
+    let mut used: FxHashSet<usize> = FxHashSet::default();
+    // Pre-compute lowercased first-content once per entry (not per category × entry)
+    let fc_lower: Vec<String> = entries.iter()
+        .map(|e| first_content(&e.body).to_lowercase()).collect();
     for &(cat, patterns) in CATEGORIES {
         let group: Vec<(usize, &Compressed)> = entries.iter().enumerate()
             .filter(|(i, e)| !used.contains(i)
                 && !e.tags.iter().any(|t| t == "raw-data")
                 && {
                     let tag_match = e.tags.iter().any(|t| patterns.contains(&t.as_str()));
-                    tag_match || {
-                        let fc = first_content(&e.body).to_lowercase();
-                        patterns.iter().any(|p| fc.contains(p))
-                    }
+                    tag_match || patterns.iter().any(|p| fc_lower[*i].contains(p))
                 })
             .collect();
         if group.is_empty() { continue; }
-        for &(i, _) in &group { used.push(i); }
+        for &(i, _) in &group { used.insert(i); }
         let _ = writeln!(out, "--- {} ({}) ---", cat, group.len());
         // Top 5 in full, next 10 as one-liners, rest summarized
         for (_, e) in group.iter().take(5) { format_entry(out, e); }
@@ -105,7 +114,7 @@ fn write_categories(out: &mut String, entries: &[Compressed]) -> Vec<usize> {
     used
 }
 
-fn write_untagged(out: &mut String, entries: &[Compressed], used: &[usize],
+fn write_untagged(out: &mut String, entries: &[Compressed], used: &FxHashSet<usize>,
                   primary: &[String]) {
     let untagged: Vec<&Compressed> = entries.iter().enumerate()
         .filter(|(i, e)| !used.contains(i) && !e.tags.iter().any(|t| t == "raw-data"))

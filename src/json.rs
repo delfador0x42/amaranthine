@@ -121,44 +121,44 @@ fn escape_into(s: &str, buf: &mut String) {
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Value::Null => write!(f, "null"),
-            Value::Bool(b) => write!(f, "{}", if *b { "true" } else { "false" }),
-            Value::Num(n) => {
-                if n.fract() == 0.0 && n.is_finite() { write!(f, "{}", *n as i64) }
-                else { write!(f, "{n}") }
+        let mut buf = String::new();
+        write_compact(self, &mut buf);
+        f.write_str(&buf)
+    }
+}
+
+fn write_compact(v: &Value, buf: &mut String) {
+    match v {
+        Value::Null => buf.push_str("null"),
+        Value::Bool(b) => buf.push_str(if *b { "true" } else { "false" }),
+        Value::Num(n) => {
+            use fmt::Write;
+            if n.fract() == 0.0 && n.is_finite() { write!(buf, "{}", *n as i64).unwrap(); }
+            else { write!(buf, "{n}").unwrap(); }
+        }
+        Value::Str(s) => {
+            buf.push('"');
+            escape_into(s, buf);
+            buf.push('"');
+        }
+        Value::Arr(items) => {
+            buf.push('[');
+            for (i, v) in items.iter().enumerate() {
+                if i > 0 { buf.push(','); }
+                write_compact(v, buf);
             }
-            Value::Str(s) => {
-                write!(f, "\"")?;
-                for c in s.chars() {
-                    match c {
-                        '"' => write!(f, "\\\"")?,
-                        '\\' => write!(f, "\\\\")?,
-                        '\n' => write!(f, "\\n")?,
-                        '\r' => write!(f, "\\r")?,
-                        '\t' => write!(f, "\\t")?,
-                        c if c < '\x20' => write!(f, "\\u{:04x}", c as u32)?,
-                        c => write!(f, "{c}")?,
-                    }
-                }
-                write!(f, "\"")
+            buf.push(']');
+        }
+        Value::Obj(pairs) => {
+            buf.push('{');
+            for (i, (k, v)) in pairs.iter().enumerate() {
+                if i > 0 { buf.push(','); }
+                buf.push('"');
+                escape_into(k, buf);
+                buf.push_str("\":");
+                write_compact(v, buf);
             }
-            Value::Arr(items) => {
-                write!(f, "[")?;
-                for (i, v) in items.iter().enumerate() {
-                    if i > 0 { write!(f, ",")?; }
-                    write!(f, "{v}")?;
-                }
-                write!(f, "]")
-            }
-            Value::Obj(pairs) => {
-                write!(f, "{{")?;
-                for (i, (k, v)) in pairs.iter().enumerate() {
-                    if i > 0 { write!(f, ",")?; }
-                    write!(f, "\"{k}\":{v}")?;
-                }
-                write!(f, "}}")
-            }
+            buf.push('}');
         }
     }
 }

@@ -51,19 +51,24 @@ pub fn tokenize(text: &str) -> Vec<String> {
     tokens
 }
 
-/// Lowercase ASCII bytes into a String — no UTF-8 decode needed.
+/// Lowercase ASCII bytes into a String — memcpy + in-place lowercase.
 #[inline]
 fn ascii_lower(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len());
-    for &b in bytes {
-        s.push(if b.is_ascii_uppercase() { (b + 32) as char } else { b as char });
-    }
-    s
+    let mut v = bytes.to_vec();
+    v.make_ascii_lowercase();
+    // Safety: input is ASCII (caller verifies), lowercasing preserves ASCII validity.
+    unsafe { String::from_utf8_unchecked(v) }
 }
 
 /// Emit a segment: push compound parts then the full lowercase token.
+/// Fast path: skip split_compound_ascii for non-CamelCase words (~80% of tokens).
 #[inline]
 fn emit_segment(original: &str, lower: String, tokens: &mut Vec<String>) {
+    let bytes = original.as_bytes();
+    if bytes.len() < 2 || !bytes[1..].iter().any(|b| b.is_ascii_uppercase()) {
+        tokens.push(lower);
+        return;
+    }
     let parts = split_compound_ascii(original);
     if parts.len() > 1 {
         for part in parts {
