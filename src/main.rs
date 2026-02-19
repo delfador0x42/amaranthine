@@ -1,6 +1,6 @@
 use amaranthine::{config, search, store, context, delete, edit,
     topics, prune, digest, stats, compact, export, xref, migrate, mcp,
-    install, time, json};
+    hook, install, time, json};
 use std::env;
 
 fn main() {
@@ -191,6 +191,8 @@ fn main() {
         }
         Some("install") => install::run(&dir).map(|()| String::new()),
         Some("init") => config::init(cmd.get(1).map(|s| s.as_str())).map(|()| String::new()),
+        Some("hook") if cmd.len() >= 2 => hook::run(&cmd[1], &dir),
+        Some("hook") => Err("usage: hook <ambient|post-build|stop|subagent-start>".into()),
         Some("help") | None => { print_help(); Ok(String::new()) }
         Some(c) => Err(format!("unknown command: {c}")),
     };

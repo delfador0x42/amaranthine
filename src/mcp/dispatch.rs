@@ -336,8 +336,15 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             let query = arg_str(args, "query");
             crate::reconstruct::run(dir, &query)
         }
+        "compact_log" => {
+            let result = crate::datalog::compact_log(dir)?;
+            let _ = crate::inverted::rebuild(dir);
+            super::load_index(dir);
+            Ok(result)
+        }
         "dep_graph" => crate::depgraph::run(dir),
         "check_stale" => crate::stats::check_stale(dir),
+        "refresh_stale" => crate::stats::refresh_stale(dir),
         _ => Err(format!("unknown tool: {name}")),
     }
 }

@@ -226,7 +226,7 @@ pub fn rebuild(dir: &Path) -> Result<String, String> {
     for e in &entries {
         let tid = builder.add_topic(&e.topic);
         let text_lower = e.body.to_lowercase();
-        let source = extract_source(&e.body);
+        let source = crate::text::extract_source(&e.body).unwrap_or_default();
         let snippet = build_snippet(&e.topic, e.timestamp_min, &e.body);
         builder.add_entry(tid, &text_lower, snippet, e.timestamp_min, source, e.offset);
     }
@@ -252,11 +252,3 @@ fn build_snippet(topic: &str, ts_min: i32, body: &str) -> String {
     format!("[{}] {} {}", topic, date, lines.join(" ").chars().take(120).collect::<String>())
 }
 
-fn extract_source(body: &str) -> String {
-    for line in body.lines() {
-        if let Some(inner) = line.strip_prefix("[source: ").and_then(|s| s.strip_suffix(']')) {
-            return inner.trim().to_string();
-        }
-    }
-    String::new()
-}

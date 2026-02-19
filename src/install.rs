@@ -53,6 +53,10 @@ pub fn run(_dir: &Path) -> Result<(), String> {
     let claude_md = PathBuf::from(&home).join(".claude/CLAUDE.md");
     update_claude_md(&claude_md)?;
 
+    // 5. Add hooks to ~/.claude/settings.json
+    let settings = PathBuf::from(&home).join(".claude/settings.json");
+    update_hooks(&settings, &installed_str)?;
+
     println!("\namaranthine installed. restart claude code to pick up MCP server.");
     println!("knowledge lives in ~/.amaranthine/");
     Ok(())
@@ -93,6 +97,63 @@ fn update_claude_json(path: &Path, exe: &str) -> Result<(), String> {
 
     fs::write(path, config.pretty()).map_err(|e| e.to_string())?;
     println!(".claude.json: configured amaranthine MCP server");
+    Ok(())
+}
+
+fn update_hooks(path: &Path, exe: &str) -> Result<(), String> {
+    use crate::json::Value;
+
+    let content = if path.exists() {
+        fs::read_to_string(path).map_err(|e| e.to_string())?
+    } else {
+        "{}".into()
+    };
+    let mut config = crate::json::parse(&content)
+        .unwrap_or(Value::Obj(Vec::new()));
+
+    // Check if hooks already point to this binary
+    let has_hooks = config.get("hooks")
+        .and_then(|h| h.get("PreToolUse"))
+        .is_some();
+    if has_hooks {
+        println!("settings.json: hooks already configured");
+        return Ok(());
+    }
+
+    fn hook_entry(exe: &str, hook_type: &str, matcher: &str) -> Value {
+        Value::Arr(vec![Value::Obj(vec![
+            ("matcher".into(), Value::Str(matcher.into())),
+            ("hooks".into(), Value::Arr(vec![Value::Obj(vec![
+                ("type".into(), Value::Str("command".into())),
+                ("command".into(), Value::Str(format!("{exe} hook {hook_type}"))),
+                ("timeout".into(), Value::Num(5)),
+            ])])),
+        ])])
+    }
+
+    let hooks = Value::Obj(vec![
+        ("PreToolUse".into(), hook_entry(exe, "ambient", "")),
+        ("PostToolUse".into(), hook_entry(exe, "post-build", "Bash")),
+        ("Stop".into(), hook_entry(exe, "stop", "")),
+        ("SubagentStart".into(), hook_entry(exe, "subagent-start", "")),
+    ]);
+
+    if config.get("hooks").is_none() {
+        config.set("hooks", hooks);
+    } else {
+        let h = config.get_mut("hooks").unwrap();
+        h.set("PreToolUse", hook_entry(exe, "ambient", ""));
+        h.set("PostToolUse", hook_entry(exe, "post-build", "Bash"));
+        h.set("Stop", hook_entry(exe, "stop", ""));
+        h.set("SubagentStart", hook_entry(exe, "subagent-start", ""));
+    }
+
+    let dir = path.parent().ok_or("no parent dir")?;
+    if !dir.exists() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    fs::write(path, config.pretty()).map_err(|e| e.to_string())?;
+    println!("settings.json: configured 4 hooks (ambient, post-build, stop, subagent-start)");
     Ok(())
 }
 

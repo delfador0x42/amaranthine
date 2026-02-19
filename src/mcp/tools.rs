@@ -87,6 +87,10 @@ pub fn tool_list() -> Value {
         .chain(SEARCH_FILTER_PROPS.iter().copied())
         .collect();
 
+    let search_variant_props: Vec<(&str, &str, &str)> = std::iter::once(("query", "string", "Search query"))
+        .chain(SEARCH_FILTER_PROPS.iter().copied())
+        .collect();
+
     let search_count_props: Vec<(&str, &str, &str)> = std::iter::once(("query", "string", "Search query"))
         .chain(SEARCH_FILTER_PROPS.iter().copied().filter(|(n, _, _)| *n != "limit"))
         .collect();
@@ -108,9 +112,9 @@ pub fn tool_list() -> Value {
         tool("search", "Search all knowledge files (case-insensitive). Splits CamelCase/snake_case. Falls back to OR when AND finds nothing.",
             &[], &search_props),
         tool("search_brief", "Quick search: just topic names + first matching line per hit",
-            &[], &search_props),
+            &[], &search_variant_props),
         tool("search_medium", "Medium search: topic + timestamp + first 2 content lines per hit. Between brief and full.",
-            &[], &search_props),
+            &[], &search_variant_props),
         tool("search_count", "Count matching sections without returning content. Fast way to gauge query scope.",
             &[], &search_count_props),
         tool("search_topics", "Show which topics matched and how many hits per topic. Best first step before deep search.",
@@ -196,7 +200,7 @@ pub fn tool_list() -> Value {
             &[], &[]),
         tool("index_stats", "Show binary index and cache statistics.",
             &[], &[]),
-        tool("index_search", "Search using the binary inverted index (~200ns per query). Requires rebuild_index first.",
+        tool("index_search", "Search using the binary inverted index (~200ns per query). Index auto-rebuilds after every write.",
             &["query"],
             &[("query", "string", "Search query"),
               ("limit", "string", "Max results (default: 10)")]),
@@ -206,12 +210,16 @@ pub fn tool_list() -> Value {
             &["query"],
             &[("query", "string", "Search query"),
               ("limit", "string", "Max results per topic (default: 5)")]),
-        tool("reconstruct", "One-shot compressed briefing: collects + compresses entries (dedup, temporal chains), groups by semantic tag, adds topic map + cross-refs + source pointers + freshness + gap detection. Use for cold-start codebase understanding.",
+        tool("reconstruct", "Architecture query: read all topics matching a keyword fully, then search other topics for related entries.",
             &["query"],
             &[("query", "string", "Module or component name to reconstruct (e.g. 'endpoint', 'engine')")]),
+        tool("compact_log", "Rewrite data.log without deleted entries. Reclaims space from tombstoned deletions.",
+            &[], &[]),
         tool("dep_graph", "Topic dependency graph: which topics reference which. Shows bidirectional edges sorted by connectivity.",
             &[], &[]),
         tool("check_stale", "Scan all entries with [source:] metadata and report which source files have been modified since the entry was written.",
+            &[], &[]),
+        tool("refresh_stale", "Show each stale entry alongside the CURRENT source file excerpt. Use after check_stale to see exactly what changed and update entries. Returns entry text + source code side-by-side for each stale entry.",
             &[], &[]),
         tool("merge_topics", "Merge all entries from one topic into another. Source topic is deleted after merge.",
             &["from", "into"],

@@ -29,7 +29,7 @@ pub struct Compressed {
 /// Run all compression passes. Returns compressed entries sorted by relevance.
 pub fn compress(entries: Vec<RawEntry>) -> Vec<Compressed> {
     let mut out: Vec<Compressed> = entries.into_iter().map(|e| {
-        let source = extract_source(&e.body);
+        let source = crate::text::extract_source(&e.body);
         let date = crate::time::minutes_to_date_str(e.timestamp_min);
         Compressed {
             topic: e.topic, body: e.body, date, days_old: e.days_old,
@@ -41,12 +41,6 @@ pub fn compress(entries: Vec<RawEntry>) -> Vec<Compressed> {
     temporal_chains(&mut out);
     out.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap_or(std::cmp::Ordering::Equal));
     out
-}
-
-fn extract_source(body: &str) -> Option<String> {
-    body.lines()
-        .find_map(|l| l.strip_prefix("[source: ").and_then(|s| s.strip_suffix(']')))
-        .map(|s| s.trim().to_string())
 }
 
 /// First non-metadata content line of an entry body.

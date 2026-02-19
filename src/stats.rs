@@ -92,6 +92,57 @@ pub fn check_stale(dir: &Path) -> Result<String, String> {
     }
 }
 
+/// For each stale entry, show the full entry text alongside the current source excerpt.
+/// Returns actionable output: you can see what changed and update the entry immediately.
+pub fn refresh_stale(dir: &Path) -> Result<String, String> {
+    let log_path = crate::config::log_path(dir);
+    if !log_path.exists() { return Err("no data.log found".into()); }
+    let entries = crate::datalog::iter_live(&log_path)?;
+    let mut out = String::new();
+    let mut stale_count = 0usize;
+    let mut checked = 0usize;
+    for e in &entries {
+        let lines: Vec<&str> = e.body.lines().collect();
+        let (src_path, src_line) = match crate::config::parse_source(&lines) {
+            Some(pair) => pair,
+            None => continue,
+        };
+        checked += 1;
+        let date = crate::time::minutes_to_date_str(e.timestamp_min);
+        if crate::config::check_staleness(&src_path, &date).is_none() { continue; }
+        stale_count += 1;
+        let _ = writeln!(out, "--- STALE [{stale_count}] topic={} (written: {date}) ---", e.topic);
+        for line in &lines { let _ = writeln!(out, "  {line}"); }
+        let _ = writeln!(out, "--- CURRENT SOURCE: {} ---", src_path);
+        let _ = writeln!(out, "{}", source_excerpt(&src_path, src_line, 10));
+        let _ = writeln!(out);
+    }
+    if stale_count == 0 {
+        Ok(format!("checked {checked} sourced entries: all fresh"))
+    } else {
+        let _ = write!(out, "{stale_count} stale of {checked} sourced entries");
+        Ok(out)
+    }
+}
+
+fn source_excerpt(path: &str, line: Option<usize>, radius: usize) -> String {
+    let resolved = crate::config::resolve_source(path);
+    let content = match resolved.and_then(|p| std::fs::read_to_string(p).ok()) {
+        Some(c) => c,
+        None => return format!("  (file not found: {path})"),
+    };
+    let file_lines: Vec<&str> = content.lines().collect();
+    let center = line.unwrap_or(1).saturating_sub(1).min(file_lines.len().saturating_sub(1));
+    let start = center.saturating_sub(radius);
+    let end = (center + radius + 1).min(file_lines.len());
+    let mut out = String::new();
+    for i in start..end {
+        let marker = if Some(i + 1) == line { ">" } else { " " };
+        let _ = writeln!(out, " {marker}{:>4} {}", i + 1, file_lines[i]);
+    }
+    out
+}
+
 pub fn get_entry(dir: &Path, topic: &str, idx: usize) -> Result<String, String> {
     let log_path = crate::config::log_path(dir);
     let entries = crate::delete::topic_entries(&log_path, topic)?;

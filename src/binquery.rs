@@ -26,6 +26,7 @@ pub struct SearchHit {
     pub score: f64,
     pub snippet: String,
     pub date_minutes: i32,
+    pub log_offset: u32,
 }
 
 pub fn search_v2(data: &[u8], query: &str, limit: usize) -> Result<Vec<SearchHit>, String> {
@@ -90,6 +91,7 @@ pub fn search_v2(data: &[u8], query: &str, limit: usize) -> Result<Vec<SearchHit
         hits.push(SearchHit {
             entry_id: eid as u32, topic_id: { m.topic_id }, score,
             snippet, date_minutes: { m.date_minutes },
+            log_offset: { m.log_offset },
         });
     }
     Ok(hits)

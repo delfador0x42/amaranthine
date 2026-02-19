@@ -81,39 +81,16 @@ pub fn read_entry(log_path: &Path, offset: u32) -> Result<LogEntry, String> {
 }
 
 /// Iterate all live entries (skipping tombstoned ones).
+/// Single-pass: collects entries and deleted offsets simultaneously, then filters.
 pub fn iter_live(log_path: &Path) -> Result<Vec<LogEntry>, String> {
     let data = fs::read(log_path).map_err(|e| format!("read data.log: {e}"))?;
     if data.len() < LOG_HEADER_SIZE as usize { return Err("data.log too small".into()); }
     if data[..4] != LOG_MAGIC { return Err("bad data.log magic".into()); }
 
-    // First pass: collect deleted offsets
+    let mut entries = Vec::new();
     let mut deleted = std::collections::HashSet::new();
     let mut pos = LOG_HEADER_SIZE as usize;
-    while pos < data.len() {
-        match data[pos] {
-            0x01 => {
-                if pos + ENTRY_HEADER_SIZE > data.len() { break; }
-                let tl = data[pos + 1] as usize;
-                let bl = u32::from_le_bytes([
-                    data[pos+2], data[pos+3], data[pos+4], data[pos+5]
-                ]) as usize;
-                pos += ENTRY_HEADER_SIZE + tl + bl;
-            }
-            0x02 => {
-                if pos + DELETE_RECORD_SIZE > data.len() { break; }
-                let target = u32::from_le_bytes([
-                    data[pos+4], data[pos+5], data[pos+6], data[pos+7]
-                ]);
-                deleted.insert(target);
-                pos += DELETE_RECORD_SIZE;
-            }
-            _ => break,
-        }
-    }
 
-    // Second pass: collect live entries
-    let mut entries = Vec::new();
-    pos = LOG_HEADER_SIZE as usize;
     while pos < data.len() {
         match data[pos] {
             0x01 => {
@@ -128,20 +105,29 @@ pub fn iter_live(log_path: &Path) -> Result<Vec<LogEntry>, String> {
                 ]);
                 let rec_end = pos + ENTRY_HEADER_SIZE + tl + bl;
                 if rec_end > data.len() { break; }
-                if !deleted.contains(&offset) {
-                    let topic = String::from_utf8_lossy(
-                        &data[pos+ENTRY_HEADER_SIZE..pos+ENTRY_HEADER_SIZE+tl]
-                    ).into();
-                    let body = String::from_utf8_lossy(
-                        &data[pos+ENTRY_HEADER_SIZE+tl..rec_end]
-                    ).into();
-                    entries.push(LogEntry { offset, topic, body, timestamp_min: ts });
-                }
+                let topic = String::from_utf8_lossy(
+                    &data[pos+ENTRY_HEADER_SIZE..pos+ENTRY_HEADER_SIZE+tl]
+                ).into();
+                let body = String::from_utf8_lossy(
+                    &data[pos+ENTRY_HEADER_SIZE+tl..rec_end]
+                ).into();
+                entries.push(LogEntry { offset, topic, body, timestamp_min: ts });
                 pos = rec_end;
             }
-            0x02 => { pos += DELETE_RECORD_SIZE; }
+            0x02 => {
+                if pos + DELETE_RECORD_SIZE > data.len() { break; }
+                let target = u32::from_le_bytes([
+                    data[pos+4], data[pos+5], data[pos+6], data[pos+7]
+                ]);
+                deleted.insert(target);
+                pos += DELETE_RECORD_SIZE;
+            }
             _ => break,
         }
+    }
+
+    if !deleted.is_empty() {
+        entries.retain(|e| !deleted.contains(&e.offset));
     }
     Ok(entries)
 }

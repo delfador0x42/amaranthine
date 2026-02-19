@@ -63,6 +63,13 @@ pub fn truncate(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+/// Extract [source: path/to/file] from entry body text.
+pub fn extract_source(body: &str) -> Option<String> {
+    body.lines()
+        .find_map(|l| l.strip_prefix("[source: ").and_then(|s| s.strip_suffix(']')))
+        .map(|s| s.trim().to_string())
+}
+
 /// Extract [tags: ...] from entry lines, formatted as #tag1 #tag2.
 pub fn extract_tags(lines: &[impl AsRef<str>]) -> Option<String> {
     for line in lines {

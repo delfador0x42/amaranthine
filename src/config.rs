@@ -79,10 +79,25 @@ pub fn parse_source(lines: &[&str]) -> Option<(String, Option<usize>)> {
     None
 }
 
+/// Resolve a source path: try as-is, then try one level of CWD subdirectories.
+/// Handles entries with relative paths like `src/foo.rs` when CWD is the project root.
+pub fn resolve_source(source: &str) -> Option<PathBuf> {
+    let p = PathBuf::from(source);
+    if p.exists() { return Some(p); }
+    for entry in fs::read_dir(".").ok()?.flatten() {
+        if entry.file_type().ok()?.is_dir() {
+            let candidate = entry.path().join(source);
+            if candidate.exists() { return Some(candidate); }
+        }
+    }
+    None
+}
+
 /// Check if a source file is newer than the entry timestamp.
 pub fn check_staleness(source: &str, entry_header: &str) -> Option<String> {
     let entry_secs = crate::time::parse_date_minutes(entry_header)? * 60;
-    let mtime = fs::metadata(source).ok()?.modified().ok()?;
+    let resolved = resolve_source(source)?;
+    let mtime = fs::metadata(&resolved).ok()?.modified().ok()?;
     let file_secs = mtime.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
     if file_secs > entry_secs {
         Some("STALE (source modified after entry)".into())
