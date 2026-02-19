@@ -11,6 +11,32 @@ pub fn run_with_tags(dir: &Path, topic: &str, text: &str, tags: Option<&str>) ->
     run_full(dir, topic, text, tags, false)
 }
 
+/// Lean write for batch_store — no lock, no dupe check, no tag suggestions.
+/// Caller must hold FileLock and do its own dedup.
+pub fn run_batch_entry(dir: &Path, topic: &str, text: &str, tags: Option<&str>) -> Result<String, String> {
+    crate::config::ensure_dir(dir)?;
+    let filename = crate::config::sanitize_topic(topic);
+    let filepath = dir.join(format!("{filename}.md"));
+    let timestamp = crate::time::LocalTime::now();
+    let cleaned_tags = tags.map(|t| normalize_tags(t));
+
+    let mut content = if !filepath.exists() {
+        format!("# {topic}\n\n")
+    } else {
+        fs::read_to_string(&filepath)
+            .map_err(|e| format!("can't read {}: {e}", filepath.display()))?
+    };
+    content.push_str(&format!("## {timestamp}\n"));
+    if let Some(ref t) = cleaned_tags {
+        if !t.is_empty() { content.push_str(&format!("[tags: {t}]\n")); }
+    }
+    content.push_str(&format!("{text}\n\n"));
+    crate::config::atomic_write(&filepath, &content)?;
+
+    let count = count_entries(&filepath);
+    Ok(format!("stored in {filename}.md ({count} entries)"))
+}
+
 pub fn run_full(dir: &Path, topic: &str, text: &str, tags: Option<&str>, force: bool) -> Result<String, String> {
     crate::config::ensure_dir(dir)?;
     let _lock = crate::lock::FileLock::acquire(dir)?;

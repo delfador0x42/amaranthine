@@ -87,7 +87,10 @@ pub fn run(dir: &Path) -> Result<(), String> {
 
         if let Some(r) = resp {
             let mut out = stdout.lock();
-            let _ = writeln!(out, "{r}");
+            if let Err(e) = writeln!(out, "{r}") {
+                eprintln!("amaranthine: stdout write error: {e}");
+                break;
+            }
             let _ = out.flush();
         }
     }
@@ -487,13 +490,19 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
         }
         "batch_store" => {
             let verbose = arg_bool(args, "verbose");
-            // Native array: entries come as Value::Arr directly from MCP
             let items = args.and_then(|a| a.get("entries"))
                 .and_then(|v| match v { Value::Arr(a) => Some(a), _ => None })
                 .ok_or("entries must be an array")?;
+            if items.len() > 30 {
+                return Err(format!(
+                    "batch too large ({} entries, max 30). Split into smaller batch_store calls.",
+                    items.len()
+                ));
+            }
+            // Single lock for entire batch
+            let _lock = crate::lock::FileLock::acquire(dir)?;
             let mut ok_count = 0;
             let mut results = Vec::new();
-            // Intra-batch dedup: track (topic_lower, text_prefix) pairs
             let mut seen: Vec<(String, String)> = Vec::new();
             for (i, item) in items.iter().enumerate() {
                 let topic = item.get("topic").and_then(|v| v.as_str()).unwrap_or("");
@@ -503,7 +512,6 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
                     results.push(format!("  [{}] skipped: missing topic or text", i + 1));
                     continue;
                 }
-                // Dedup: first 60 chars of text + topic
                 let key = (
                     topic.to_lowercase(),
                     text.chars().take(60).collect::<String>().to_lowercase(),
@@ -513,7 +521,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
                     continue;
                 }
                 seen.push(key);
-                match crate::store::run_full(dir, topic, text, tags, false) {
+                match crate::store::run_batch_entry(dir, topic, text, tags) {
                     Ok(msg) => {
                         ok_count += 1;
                         let f = crate::config::sanitize_topic(topic);
@@ -528,6 +536,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
                     }
                 }
             }
+            drop(_lock);
             if ok_count > 0 {
                 let _ = crate::inverted::rebuild(dir);
                 load_index(dir);
