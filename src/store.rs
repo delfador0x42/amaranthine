@@ -57,6 +57,10 @@ pub fn run_full_ext(
     let mut msg = format!("stored in {topic}\n  @ {ts}{tag_echo}{conf_echo}{link_echo}\n{echo}");
     if let Some(hint) = topic_hint { msg.push_str(&format!("\n  note: {hint}")); }
     if let Some(ref dw) = dupe_warn { msg.push_str(&format!("\n  dupe warning: {dw}")); }
+    if let Some(link_str) = links {
+        let warn = validate_links(dir, link_str);
+        if !warn.is_empty() { msg.push_str(&format!("\n  link warnings: {warn}")); }
+    }
     Ok(msg)
 }
 
@@ -82,6 +86,18 @@ pub fn run_batch_entry_to(
     let ts_min = LocalTime::now().to_minutes() as i32;
     crate::datalog::append_entry_to(f, topic, &body, ts_min)?;
     Ok(format!("stored in {topic}"))
+}
+
+/// Import entry with explicit timestamp (preserves original dates on import).
+pub fn import_entry(
+    dir: &Path, topic: &str, body: &str, tags: Option<&str>, ts_min: i32,
+) -> Result<String, String> {
+    crate::config::ensure_dir(dir)?;
+    let log_path = crate::datalog::ensure_log(dir)?;
+    let cleaned_tags = tags.map(|t| normalize_tags(t));
+    let body = build_body(body, cleaned_tags.as_deref(), None, None, None);
+    crate::datalog::append_entry(&log_path, topic, &body, ts_min)?;
+    Ok(format!("imported to {topic}"))
 }
 
 /// Append text to the last entry in a topic (no new timestamp).
@@ -192,4 +208,20 @@ fn suggest_topic(dir: &Path, new_topic: &str) -> Option<String> {
         .map(|(_, name, _)| name.clone()).collect();
     if similar.is_empty() { return None; }
     Some(format!("new topic. similar: {}", similar.join(", ")))
+}
+
+fn validate_links(dir: &Path, links: &str) -> String {
+    let mut warnings = Vec::new();
+    let _ = crate::cache::with_corpus(dir, |cached| {
+        let topics: std::collections::BTreeSet<&str> =
+            cached.iter().map(|e| e.topic.as_str()).collect();
+        for pair in links.split_whitespace() {
+            if let Some((topic, _)) = pair.rsplit_once(':') {
+                if !topics.contains(topic) {
+                    warnings.push(format!("'{}' not found", topic));
+                }
+            }
+        }
+    });
+    warnings.join(", ")
 }

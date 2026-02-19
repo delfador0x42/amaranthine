@@ -126,6 +126,10 @@ fn search_v2_core(
     let post_off = { hdr.postings_off } as usize;
     let meta_off = { hdr.meta_off } as usize;
     let snip_off = { hdr.snippet_off } as usize;
+    let data_len = data.len();
+    if post_off > data_len || meta_off > data_len || snip_off > data_len {
+        return Err("index.bin truncated: section offsets exceed file size".into());
+    }
     let mask = table_cap - 1;
     let num_terms = terms.len() as u16;
 

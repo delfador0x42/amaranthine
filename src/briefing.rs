@@ -80,7 +80,14 @@ fn write_categories(out: &mut String, entries: &[Compressed]) -> Vec<usize> {
     for &(cat, patterns) in CATEGORIES {
         let group: Vec<(usize, &Compressed)> = entries.iter().enumerate()
             .filter(|(i, e)| !used.contains(i)
-                && e.tags.iter().any(|t| patterns.contains(&t.as_str())))
+                && !e.tags.iter().any(|t| t == "raw-data")
+                && {
+                    let tag_match = e.tags.iter().any(|t| patterns.contains(&t.as_str()));
+                    tag_match || {
+                        let fc = first_content(&e.body).to_lowercase();
+                        patterns.iter().any(|p| fc.contains(p))
+                    }
+                })
             .collect();
         if group.is_empty() { continue; }
         for &(i, _) in &group { used.push(i); }
@@ -101,7 +108,8 @@ fn write_categories(out: &mut String, entries: &[Compressed]) -> Vec<usize> {
 fn write_untagged(out: &mut String, entries: &[Compressed], used: &[usize],
                   primary: &[String]) {
     let untagged: Vec<&Compressed> = entries.iter().enumerate()
-        .filter(|(i, _)| !used.contains(i)).map(|(_, e)| e).collect();
+        .filter(|(i, e)| !used.contains(i) && !e.tags.iter().any(|t| t == "raw-data"))
+        .map(|(_, e)| e).collect();
     if untagged.is_empty() { return; }
 
     // Group by topic, budget: primary=5, non-primary=2

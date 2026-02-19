@@ -70,7 +70,10 @@ pub fn import(dir: &Path, json_str: &str) -> Result<String, String> {
                 }
                 _ => None,
             });
-            crate::store::run_with_tags(dir, topic, body, tags.as_deref())?;
+            let ts_str = entry.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+            let ts_min = crate::time::parse_date_minutes(ts_str)
+                .unwrap_or_else(|| crate::time::LocalTime::now().to_minutes()) as i32;
+            crate::store::import_entry(dir, topic, body, tags.as_deref(), ts_min)?;
             imported += 1;
         }
     }

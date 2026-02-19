@@ -91,9 +91,9 @@ fn temporal_chains(entries: &mut Vec<Compressed>) {
         }
     }
     let mut remove = Vec::new();
+    // Pass 1: dominant term grouping
     for ((_, term), indices) in &groups {
         if indices.len() < 2 { continue; }
-        // Sort oldest first (highest days_old = oldest)
         let mut sorted: Vec<usize> = indices.clone();
         sorted.sort_by(|a, b| entries[*b].days_old.cmp(&entries[*a].days_old));
         let steps: Vec<String> = sorted.iter().map(|&i| {
@@ -105,6 +105,34 @@ fn temporal_chains(entries: &mut Vec<Compressed>) {
             else { format!("{} ({})", step, &entries[i].date[5..]) }
         }).collect();
         let chain = format!("{}: {}", term, steps.join(" → "));
+        let newest = *sorted.last().unwrap();
+        entries[newest].chain = Some(chain);
+        entries[newest].relevance += sorted.len() as f64;
+        for &idx in sorted.iter().take(sorted.len() - 1) { remove.push(idx); }
+    }
+    // Pass 2: date-proximity fallback — group unchained same-topic entries
+    // within 48-hour buckets. Only chains groups of 3+ (avoids trivial pairs).
+    let chained: std::collections::BTreeSet<usize> = remove.iter().copied()
+        .chain(entries.iter().enumerate()
+            .filter(|(_, e)| e.chain.is_some()).map(|(i, _)| i))
+        .collect();
+    let mut date_groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i, e) in entries.iter().enumerate() {
+        if chained.contains(&i) { continue; }
+        let bucket = e.days_old / 2;
+        date_groups.entry(format!("{}:{}", e.topic, bucket)).or_default().push(i);
+    }
+    for (_, indices) in &date_groups {
+        if indices.len() < 3 { continue; }
+        let mut sorted: Vec<usize> = indices.clone();
+        sorted.sort_by(|a, b| entries[*b].days_old.cmp(&entries[*a].days_old));
+        let previews: Vec<String> = sorted.iter().take(4).map(|&i| {
+            let fc = first_content(&entries[i].body);
+            crate::text::truncate(fc, 25).to_string()
+        }).collect();
+        let date = &entries[sorted[0]].date;
+        let date_short = if date.len() >= 10 { &date[..10] } else { date };
+        let chain = format!("batch {}: {}", date_short, previews.join(" | "));
         let newest = *sorted.last().unwrap();
         entries[newest].chain = Some(chain);
         entries[newest].relevance += sorted.len() as f64;

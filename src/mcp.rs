@@ -39,7 +39,7 @@ pub fn run(dir: &Path) -> Result<(), String> {
 
     for line in stdin.lock().lines() {
         let line = line.map_err(|e| e.to_string())?;
-        if line.is_empty() { continue; }
+        if line.is_empty() || line.len() > 10_000_000 { continue; }
         let msg = match crate::json::parse(&line) {
             Ok(v) => v,
             Err(_) => continue,
@@ -190,7 +190,7 @@ fn init_result() -> Value {
         ])),
         ("serverInfo".into(), Value::Obj(vec![
             ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("5.2.0".into())),
+            ("version".into(), Value::Str("6.1.0".into())),
         ])),
     ])
 }

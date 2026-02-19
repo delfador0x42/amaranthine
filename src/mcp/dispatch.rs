@@ -55,7 +55,8 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             let mut ok_count = 0;
             let mut results = Vec::new();
             let mut seen: Vec<(String, String)> = Vec::new();
-            for (i, item) in items.iter().enumerate() {
+            let mut batch_tokens: Vec<(String, std::collections::HashSet<String>)> = Vec::new();
+            'batch: for (i, item) in items.iter().enumerate() {
                 let topic = item.get("topic").and_then(|v| v.as_str()).unwrap_or("");
                 let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 let tags = item.get("tags").and_then(|v| v.as_str());
@@ -73,6 +74,25 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
                     continue;
                 }
                 seen.push(key);
+                // Token-based semantic dupe check within batch
+                let new_tokens: std::collections::HashSet<String> = crate::text::tokenize(text)
+                    .into_iter().filter(|t| t.len() >= 3).collect();
+                if new_tokens.len() >= 6 {
+                    let mut is_dupe = false;
+                    for (prev_topic, prev_tokens) in &batch_tokens {
+                        if *prev_topic != topic { continue; }
+                        let intersection = new_tokens.iter()
+                            .filter(|t| prev_tokens.contains(*t)).count();
+                        let union = new_tokens.len() + prev_tokens.len() - intersection;
+                        if union > 0 && intersection as f64 / union as f64 > 0.70 {
+                            results.push(format!("  [{}] skipped: similar to earlier batch entry", i + 1));
+                            is_dupe = true;
+                            break;
+                        }
+                    }
+                    if is_dupe { continue 'batch; }
+                    batch_tokens.push((topic.to_string(), new_tokens));
+                }
                 match crate::store::run_batch_entry_to(&mut log_file, topic, text, tags, source) {
                     Ok(msg) => {
                         ok_count += 1;
@@ -350,7 +370,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             let store_topic = arg_str(args, "store_topic");
             if !store_topic.is_empty() {
                 let tags = arg_str(args, "tags");
-                let tags = if tags.is_empty() { "structural,coupling" } else { tags.as_str() };
+                let tags = if tags.is_empty() { "structural,coupling,raw-data" } else { tags.as_str() };
                 let source = format!("{}/**/{}", path_str, glob);
                 crate::store::run_full(dir, &store_topic, &result, Some(tags), true, Some(&source))?;
                 super::after_write(dir, &store_topic);
