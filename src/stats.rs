@@ -6,13 +6,8 @@ pub fn list_tags(dir: &Path) -> Result<String, String> {
     crate::cache::with_corpus(dir, |cached| {
         let mut tags: BTreeMap<String, usize> = BTreeMap::new();
         for e in cached {
-            if let Some(ref line) = e.tags_raw {
-                if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
-                    for tag in inner.split(',') {
-                        let t = tag.trim();
-                        if !t.is_empty() { *tags.entry(t.to_string()).or_insert(0) += 1; }
-                    }
-                }
+            for t in e.tags() {
+                *tags.entry(t.to_string()).or_insert(0) += 1;
             }
         }
         let mut out = String::new();
@@ -41,14 +36,10 @@ pub fn stats(dir: &Path) -> Result<String, String> {
                 oldest = Some(oldest.map_or(e.timestamp_min, |o: i32| o.min(e.timestamp_min)));
                 newest = Some(newest.map_or(e.timestamp_min, |n: i32| n.max(e.timestamp_min)));
             }
-            if let Some(ref line) = e.tags_raw {
-                if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
-                    tagged += 1;
-                    for tag in inner.split(',') {
-                        let t = tag.trim();
-                        if !t.is_empty() { tags.insert(t.to_string()); }
-                    }
-                }
+            let entry_tags = e.tags();
+            if !entry_tags.is_empty() {
+                tagged += 1;
+                for t in entry_tags { tags.insert(t.to_string()); }
             }
         }
         let now_days = crate::time::LocalTime::now().to_days();
@@ -58,8 +49,8 @@ pub fn stats(dir: &Path) -> Result<String, String> {
         let _ = writeln!(out, "tagged entries: {tagged}");
         let _ = writeln!(out, "unique tags:    {}", tags.len());
         if let (Some(o), Some(n)) = (oldest, newest) {
-            let _ = writeln!(out, "oldest entry:   {} days ago", now_days - o as i64 / 1440);
-            let _ = writeln!(out, "newest entry:   {} days ago", now_days - n as i64 / 1440);
+            let _ = writeln!(out, "oldest entry:   {} days ago", now_days - (o as i64 / 1440));
+            let _ = writeln!(out, "newest entry:   {} days ago", now_days - (n as i64 / 1440));
         }
         out
     })
@@ -73,7 +64,7 @@ pub fn check_stale(dir: &Path) -> Result<String, String> {
             let lines: Vec<&str> = e.body.lines().collect();
             if let Some((ref src_path, _)) = crate::config::parse_source(&lines) {
                 checked += 1;
-                let date = crate::time::minutes_to_date_str(e.timestamp_min);
+                let date = e.date_str();
                 if let Some(msg) = crate::config::check_staleness(src_path, &date) {
                     let preview = lines.iter()
                         .find(|l| !l.starts_with('[') && !l.trim().is_empty())
@@ -104,7 +95,7 @@ pub fn refresh_stale(dir: &Path) -> Result<String, String> {
                 None => continue,
             };
             checked += 1;
-            let date = crate::time::minutes_to_date_str(e.timestamp_min);
+            let date = e.date_str();
             if crate::config::check_staleness(&src_path, &date).is_none() { continue; }
             stale_count += 1;
             let _ = writeln!(out, "--- STALE [{stale_count}] topic={} (written: {date}) ---", e.topic);

@@ -76,7 +76,7 @@ fn refs_via_corpus(dir: &Path, filename: &str) -> Result<String, String> {
                 && search_tokens.iter().all(|t| e.token_set.contains(*t));
             if all_match {
                 let preview = e.body.lines()
-                    .find(|l| !l.starts_with("[tags:") && !l.starts_with("[source:") && !l.trim().is_empty())
+                    .find(|l| !l.starts_with("[tags:") && !l.starts_with("[source:") && !l.starts_with("[confidence:") && !l.starts_with("[links:") && !l.trim().is_empty())
                     .map(|l| { let t = l.trim(); if t.len() > 70 { &t[..70] } else { t } })
                     .unwrap_or("(empty)");
                 let _ = writeln!(out, "  [{}] {preview}", e.topic);

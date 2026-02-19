@@ -14,7 +14,11 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             let terse = arg_bool(args, "terse");
             let source = arg_str(args, "source");
             let source = if source.is_empty() { None } else { Some(source.as_str()) };
-            let result = crate::store::run_full(dir, &topic, &text, tags, force, source)?;
+            let conf_str = arg_str(args, "confidence");
+            let confidence = conf_str.parse::<f64>().ok().filter(|c| *c >= 0.0 && *c <= 1.0);
+            let links_str = arg_str(args, "links");
+            let links = if links_str.is_empty() { None } else { Some(links_str.as_str()) };
+            let result = crate::store::run_full_ext(dir, &topic, &text, tags, force, source, confidence, links)?;
             super::after_write(dir, &topic);
             super::log_session(format!("[{}] {}", topic,
                 result.lines().next().unwrap_or("stored")));
@@ -99,49 +103,24 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
         }
         "search" => {
             let query = arg_str(args, "query");
-            let limit = arg_str(args, "limit").parse::<usize>().ok();
             let detail = arg_str(args, "detail");
             let filter = build_filter(args);
-            // F2: Pass cached index data to avoid disk reads
-            let guard = super::INDEX.read().map_err(|e| e.to_string())?;
-            let idx = guard.as_ref().map(|i| i.data.as_slice());
-            let result = match detail.as_str() {
-                "full" => crate::search::run(dir, &query, true, limit, &filter, idx),
-                "brief" => crate::search::run_brief(dir, &query, limit, &filter, idx),
-                _ => crate::search::run_medium(dir, &query, limit, &filter, idx),
-            };
-            drop(guard);
-            result
-        }
-        "search_brief" => {
-            let query = arg_str(args, "query");
-            let limit = arg_str(args, "limit").parse::<usize>().ok();
-            let filter = build_filter(args);
-            let guard = super::INDEX.read().map_err(|e| e.to_string())?;
-            let idx = guard.as_ref().map(|i| i.data.as_slice());
-            let result = crate::search::run_brief(dir, &query, limit, &filter, idx);
-            drop(guard);
-            result
-        }
-        "search_medium" => {
-            let query = arg_str(args, "query");
-            let limit = arg_str(args, "limit").parse::<usize>().ok();
-            let filter = build_filter(args);
-            let guard = super::INDEX.read().map_err(|e| e.to_string())?;
-            let idx = guard.as_ref().map(|i| i.data.as_slice());
-            let result = crate::search::run_medium(dir, &query, limit, &filter, idx);
-            drop(guard);
-            result
-        }
-        "search_count" => {
-            let query = arg_str(args, "query");
-            let filter = build_filter(args);
-            crate::search::count(dir, &query, &filter)
-        }
-        "search_topics" => {
-            let query = arg_str(args, "query");
-            let filter = build_filter(args);
-            crate::search::run_topics(dir, &query, &filter)
+            match detail.as_str() {
+                "count" => crate::search::count(dir, &query, &filter),
+                "topics" => crate::search::run_topics(dir, &query, &filter),
+                _ => {
+                    let limit = arg_str(args, "limit").parse::<usize>().ok();
+                    let guard = super::INDEX.read().map_err(|e| e.to_string())?;
+                    let idx = guard.as_ref().map(|i| i.data.as_slice());
+                    let result = match detail.as_str() {
+                        "full" => crate::search::run(dir, &query, true, limit, &filter, idx),
+                        "brief" => crate::search::run_brief(dir, &query, limit, &filter, idx),
+                        _ => crate::search::run_medium(dir, &query, limit, &filter, idx),
+                    };
+                    drop(guard);
+                    result
+                }
+            }
         }
         "context" => {
             let q = arg_str(args, "query");
@@ -164,25 +143,24 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
                 crate::topics::recent(dir, days, true)
             }
         }
-        "delete_entry" => {
+        "delete" => {
             let topic = arg_str(args, "topic");
-            let idx_str = arg_str(args, "index");
-            let m = arg_str(args, "match_str");
-            let result = if !idx_str.is_empty() {
-                let idx: usize = idx_str.parse()
-                    .map_err(|_| format!("invalid index: '{idx_str}'"))?;
-                crate::delete::run_by_index(dir, &topic, idx)
-            } else if !m.is_empty() {
-                crate::delete::run(dir, &topic, false, false, Some(m.as_str()))
+            let all = arg_bool(args, "all");
+            let result = if all {
+                crate::delete::run(dir, &topic, false, true, None)
             } else {
-                crate::delete::run(dir, &topic, true, false, None)
+                let idx_str = arg_str(args, "index");
+                let m = arg_str(args, "match_str");
+                if !idx_str.is_empty() {
+                    let idx: usize = idx_str.parse()
+                        .map_err(|_| format!("invalid index: '{idx_str}'"))?;
+                    crate::delete::run_by_index(dir, &topic, idx)
+                } else if !m.is_empty() {
+                    crate::delete::run(dir, &topic, false, false, Some(m.as_str()))
+                } else {
+                    crate::delete::run(dir, &topic, true, false, None)
+                }
             }?;
-            super::after_write(dir, &topic);
-            Ok(result)
-        }
-        "delete_topic" => {
-            let topic = arg_str(args, "topic");
-            let result = crate::delete::run(dir, &topic, false, true, None)?;
             super::after_write(dir, &topic);
             Ok(result)
         }
@@ -390,7 +368,7 @@ fn arg_str(args: Option<&Value>, key: &str) -> String {
     args.and_then(|a| a.get(key))
         .map(|v| match v {
             Value::Str(s) => s.clone(),
-            Value::Num(n) => n.to_string(),
+            Value::Num(n) => if n.fract() == 0.0 { format!("{}", *n as i64) } else { n.to_string() },
             Value::Bool(b) => if *b { "true" } else { "false" }.into(),
             _ => String::new(),
         })

@@ -68,9 +68,8 @@ pub fn append_by_tag(dir: &Path, topic: &str, tag: &str, extra: &str) -> Result<
     let tag_lower = tag.to_lowercase();
     let entry = entries.iter().rev().find(|e| {
         e.body.lines().any(|line| {
-            line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']'))
-                .map(|inner| inner.split(',').any(|t| t.trim().to_lowercase() == tag_lower))
-                .unwrap_or(false)
+            crate::text::parse_tags_raw(Some(line))
+                .iter().any(|t| t.to_lowercase() == tag_lower)
         })
     }).ok_or_else(|| format!("no entry with tag '{}' in {}", tag, topic))?;
     let new_body = format!("{}\n{extra}", entry.body.trim_end());
@@ -123,11 +122,9 @@ pub fn tag_entry(
     let mut tags: Vec<String> = Vec::new();
     let mut body_lines: Vec<&str> = Vec::new();
     for line in entry.body.lines() {
-        if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
-            for t in inner.split(',') {
-                let t = t.trim().to_lowercase();
-                if !t.is_empty() { tags.push(t); }
-            }
+        let parsed = crate::text::parse_tags_raw(Some(line));
+        if !parsed.is_empty() {
+            for t in parsed { tags.push(t.to_lowercase()); }
         } else { body_lines.push(line); }
     }
 

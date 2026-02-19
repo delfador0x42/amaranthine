@@ -18,6 +18,44 @@ pub struct CachedEntry {
     pub tf_map: FxHashMap<String, usize>,
     pub word_count: usize,
     pub tags_raw: Option<String>,
+    pub confidence: f64, // 0.0-1.0, default 1.0; explicit from [confidence:] metadata
+    pub links: Vec<(String, usize)>, // (topic, entry_index) from [links:] metadata
+}
+
+impl CachedEntry {
+    /// Parse tags from cached tags_raw field.
+    pub fn tags(&self) -> Vec<&str> {
+        crate::text::parse_tags_raw(self.tags_raw.as_deref())
+    }
+    /// Check if entry has a specific tag (tags are already lowercase).
+    pub fn has_tag(&self, tag: &str) -> bool {
+        crate::text::parse_tags_raw(self.tags_raw.as_deref())
+            .iter().any(|t| *t == tag)
+    }
+    /// Format timestamp as "YYYY-MM-DD HH:MM".
+    pub fn date_str(&self) -> String {
+        crate::time::minutes_to_date_str(self.timestamp_min)
+    }
+    /// Day number since epoch (minutes / 1440).
+    pub fn day(&self) -> i64 {
+        self.timestamp_min as i64 / 1440
+    }
+    /// Days since entry was created.
+    pub fn days_old(&self, now_days: i64) -> i64 {
+        now_days - self.day()
+    }
+    /// First non-metadata content line of entry body.
+    pub fn preview(&self) -> &str {
+        crate::compress::first_content(&self.body)
+    }
+    /// Confidence as u8 (0-255) for binary index.
+    pub fn confidence_u8(&self) -> u8 {
+        (self.confidence.clamp(0.0, 1.0) * 255.0) as u8
+    }
+    /// Whether this entry has narrative links to other entries.
+    pub fn has_links(&self) -> bool {
+        !self.links.is_empty()
+    }
 }
 
 struct CachedCorpus {
@@ -70,12 +108,18 @@ where F: FnOnce(&[CachedEntry]) -> R {
         let tags_raw = e.body.lines()
             .find(|l| l.starts_with("[tags: "))
             .map(|l| l.to_string());
+        let confidence = e.body.lines()
+            .find_map(|l| l.strip_prefix("[confidence: ")
+                .and_then(|s| s.strip_suffix(']'))
+                .and_then(|s| s.trim().parse::<f64>().ok()))
+            .unwrap_or(1.0);
+        let links = parse_links(&e.body);
         entries.push(CachedEntry {
             topic,
             body: e.body.clone(),
             timestamp_min: e.timestamp_min,
             offset: e.offset,
-            tokens, token_set, tf_map, word_count, tags_raw,
+            tokens, token_set, tf_map, word_count, tags_raw, confidence, links,
         });
     }
 
@@ -95,4 +139,19 @@ pub fn stats() -> CacheStats {
         Some(c) => CacheStats { entries: c.entries.len(), cached: true },
         None => CacheStats { entries: 0, cached: false },
     }
+}
+
+/// Parse `[links: topic:idx topic:idx]` metadata from entry body.
+fn parse_links(body: &str) -> Vec<(String, usize)> {
+    body.lines()
+        .find_map(|l| l.strip_prefix("[links: ").and_then(|s| s.strip_suffix(']')))
+        .map(|inner| {
+            inner.split_whitespace()
+                .filter_map(|pair| {
+                    let (topic, idx) = pair.rsplit_once(':')?;
+                    Some((topic.to_string(), idx.parse().ok()?))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }

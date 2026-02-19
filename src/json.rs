@@ -4,7 +4,7 @@ use std::fmt;
 pub enum Value {
     Null,
     Bool(bool),
-    Num(i64),
+    Num(f64),
     Str(String),
     Arr(Vec<Value>),
     Obj(Vec<(String, Value)>),
@@ -43,6 +43,13 @@ impl Value {
     }
 
     pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Value::Num(n) => Some(*n as i64),
+            _ => None,
+        }
+    }
+
+    pub fn as_f64(&self) -> Option<f64> {
         match self {
             Value::Num(n) => Some(*n),
             _ => None,
@@ -117,7 +124,10 @@ impl fmt::Display for Value {
         match self {
             Value::Null => write!(f, "null"),
             Value::Bool(b) => write!(f, "{}", if *b { "true" } else { "false" }),
-            Value::Num(n) => write!(f, "{n}"),
+            Value::Num(n) => {
+                if n.fract() == 0.0 && n.is_finite() { write!(f, "{}", *n as i64) }
+                else { write!(f, "{n}") }
+            }
             Value::Str(s) => {
                 write!(f, "\"")?;
                 for c in s.chars() {
@@ -253,8 +263,7 @@ impl Parser<'_> {
             while self.pos < self.b.len() && self.b[self.pos].is_ascii_digit() { self.pos += 1; }
         }
         let s = std::str::from_utf8(&self.b[start..self.pos]).unwrap_or("0");
-        s.parse::<i64>()
-            .or_else(|_| s.parse::<f64>().map(|f| f as i64))
+        s.parse::<f64>()
             .map(Value::Num)
             .map_err(|e| e.to_string())
     }

@@ -82,17 +82,9 @@ const SEARCH_FILTER_PROPS: &[(&str, &str, &str)] = &[
 pub fn tool_list() -> Value {
     let search_props: Vec<(&str, &str, &str)> = [
         ("query", "string", "Search query"),
-        ("detail", "string", "Result detail level: 'full', 'medium' (default), or 'brief'"),
+        ("detail", "string", "Result detail level: 'full', 'medium' (default), 'brief', 'count', or 'topics'"),
     ].into_iter()
         .chain(SEARCH_FILTER_PROPS.iter().copied())
-        .collect();
-
-    let search_variant_props: Vec<(&str, &str, &str)> = std::iter::once(("query", "string", "Search query"))
-        .chain(SEARCH_FILTER_PROPS.iter().copied())
-        .collect();
-
-    let search_count_props: Vec<(&str, &str, &str)> = std::iter::once(("query", "string", "Search query"))
-        .chain(SEARCH_FILTER_PROPS.iter().copied().filter(|(n, _, _)| *n != "limit"))
         .collect();
 
     Value::Arr(vec![
@@ -103,22 +95,16 @@ pub fn tool_list() -> Value {
               ("tags", "string", "Comma-separated tags (e.g. 'bug,p0,iris')"),
               ("force", "string", "Set to 'true' to bypass duplicate detection"),
               ("source", "string", "Source file reference: 'path/to/file:line'. Enables staleness detection."),
-              ("terse", "string", "Set to 'true' for minimal response (just first line)")]),
+              ("terse", "string", "Set to 'true' for minimal response (just first line)"),
+              ("confidence", "string", "Confidence level 0.0-1.0 (default: 1.0). Affects search ranking."),
+              ("links", "string", "Space-separated references: 'topic:index topic:index'. Creates narrative links.")]),
         tool("append", "Add text to the last entry in a topic (no new timestamp). Use when adding related info to a recent entry.",
             &["topic", "text"],
             &[("topic", "string", "Topic name"),
               ("text", "string", "Text to append")]),
         batch_store_tool(),
-        tool("search", "Search all knowledge files (case-insensitive). Splits CamelCase/snake_case. Falls back to OR when AND finds nothing.",
+        tool("search", "Search all knowledge files (case-insensitive). Splits CamelCase/snake_case. Falls back to OR when AND finds nothing. Use detail param: 'full' (complete entry), 'medium' (default, 2 lines), 'brief' (topic+first line), 'count' (match count only), 'topics' (hits per topic).",
             &[], &search_props),
-        tool("search_brief", "Quick search: just topic names + first matching line per hit",
-            &[], &search_variant_props),
-        tool("search_medium", "Medium search: topic + timestamp + first 2 content lines per hit. Between brief and full.",
-            &[], &search_variant_props),
-        tool("search_count", "Count matching sections without returning content. Fast way to gauge query scope.",
-            &[], &search_count_props),
-        tool("search_topics", "Show which topics matched and how many hits per topic. Best first step before deep search.",
-            &[], &search_count_props),
         tool("context", "Session briefing: topics + recent entries (7 days) + optional search",
             &[],
             &[("query", "string", "Optional search query"),
@@ -129,14 +115,12 @@ pub fn tool_list() -> Value {
             &[],
             &[("days", "string", "Number of days (default: 7)"),
               ("hours", "string", "Number of hours (overrides days for finer granularity)")]),
-        tool("delete_entry", "Remove the most recent entry from a topic",
+        tool("delete", "Delete entries or entire topic. Use index/match_str to target specific entries, or all=true for entire topic.",
             &["topic"],
             &[("topic", "string", "Topic name"),
-              ("match_str", "string", "Delete entry matching this substring instead of last"),
-              ("index", "string", "Delete entry by index number (from list_entries)")]),
-        tool("delete_topic", "Delete an entire topic and all its entries",
-            &["topic"],
-            &[("topic", "string", "Topic name")]),
+              ("index", "string", "Delete entry by index number (from list_entries)"),
+              ("match_str", "string", "Delete entry matching this substring"),
+              ("all", "string", "Set to 'true' to delete entire topic")]),
         tool("append_entry", "Add text to an existing entry found by substring match, index, or tag (keeps timestamp, preserves body)",
             &["topic", "text"],
             &[("topic", "string", "Topic name"),

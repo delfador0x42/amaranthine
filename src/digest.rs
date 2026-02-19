@@ -18,17 +18,12 @@ pub fn run(dir: &Path) -> Result<String, String> {
         for (i, name) in topic_order.iter().enumerate() {
             let group = &grouped[name.as_str()];
             if i > 0 { let _ = writeln!(out); }
-            let latest = group.last().map(|e| crate::time::minutes_to_date_str(e.timestamp_min))
+            let latest = group.last().map(|e| e.date_str())
                 .unwrap_or_else(|| "empty".into());
             let _ = writeln!(out, "### {} ({} entries, last: {})", name, group.len(), latest);
             for e in group {
-                let preview = e.body.lines()
-                    .find(|l| {
-                        let t = l.trim();
-                        !t.is_empty() && !t.starts_with("[tags:") && !t.starts_with("[source:")
-                            && !t.starts_with("[type:") && !t.starts_with("[modified:")
-                    })
-                    .unwrap_or("(empty)");
+                let preview = e.preview();
+                let preview = if preview.is_empty() { "(empty)" } else { preview };
                 let _ = writeln!(out, "- {}", crate::text::truncate(preview.trim().trim_start_matches("- "), 100));
             }
         }

@@ -126,7 +126,7 @@ fn update_hooks(path: &Path, exe: &str) -> Result<(), String> {
             ("hooks".into(), Value::Arr(vec![Value::Obj(vec![
                 ("type".into(), Value::Str("command".into())),
                 ("command".into(), Value::Str(format!("{exe} hook {hook_type}"))),
-                ("timeout".into(), Value::Num(5)),
+                ("timeout".into(), Value::Num(5.0)),
             ])])),
         ])])
     }
@@ -179,10 +179,10 @@ fn update_claude_md(path: &Path) -> Result<(), String> {
         "Cross-session knowledge store via MCP tools (prefixed `amaranthine__`).\n\n",
         "**Every session:** `search(query)` before starting work.\n",
         "**During work:** `store(topic, text, tags?)` for non-obvious findings.\n\n",
-        "**Search:** `search` (full) | `search_medium` (2-line) | ",
-        "`search_brief` (1-line) | `search_topics` | `search_count`\n",
+        "**Search:** `search` (detail: full/medium/brief/count/topics) | ",
+        "`search_entity` | `index_search`\n",
         "**Write:** `store` | `batch_store` | `append` | ",
-        "`append_entry` | `update_entry` | `delete_entry`\n",
+        "`append_entry` | `update_entry` | `delete`\n",
         "**Browse:** `context` | `topics` | `recent` | ",
         "`read_topic` | `digest` | `stats` | `list_tags`\n",
         "**Analysis:** `reconstruct` (one-shot semantic synthesis) | ",

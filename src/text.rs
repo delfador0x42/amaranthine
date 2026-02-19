@@ -136,6 +136,14 @@ pub fn extract_source(body: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
+/// Parse raw tags line "[tags: a, b, c]" → vec!["a", "b", "c"].
+/// Accepts CachedEntry.tags_raw or any "[tags: ...]" line.
+pub fn parse_tags_raw(raw: Option<&str>) -> Vec<&str> {
+    raw.and_then(|line| line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')))
+        .map(|inner| inner.split(',').map(|t| t.trim()).filter(|t| !t.is_empty()).collect())
+        .unwrap_or_default()
+}
+
 /// Extract [tags: ...] from entry lines, formatted as #tag1 #tag2.
 pub fn extract_tags(lines: &[impl AsRef<str>]) -> Option<String> {
     for line in lines {

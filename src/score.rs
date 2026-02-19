@@ -72,8 +72,7 @@ fn score_cached_mode(entries: &[&crate::cache::CachedEntry], terms: &[String],
                 let tag_hits = terms.iter().filter(|t| tag_line.contains(t.as_str())).count();
                 if tag_hits > 0 { score *= 1.0 + 0.3 * tag_hits as f64; }
             }
-            let date = crate::time::minutes_to_date_str(e.timestamp_min);
-            let mut lines = vec![format!("## {date}")];
+            let mut lines = vec![format!("## {}", e.date_str())];
             for line in e.body.lines() { lines.push(line.to_string()); }
             Some(ScoredResult { name: e.topic.to_string(), lines: Rc::new(lines), score })
         })
@@ -165,18 +164,12 @@ pub fn count_on_cache(dir: &Path, terms: &[String], filter: &Filter)
 
 fn passes_filter_cached(e: &crate::cache::CachedEntry, f: &Filter) -> bool {
     if f.after.is_some() || f.before.is_some() {
-        let days = e.timestamp_min as i64 / 1440;
+        let days = e.day();
         if let Some(after) = f.after { if days < after { return false; } }
         if let Some(before) = f.before { if days > before { return false; } }
     }
     if let Some(ref tag) = f.tag {
-        // Filter tag and stored tags are already lowercase (store::normalize_tags)
-        let has = e.tags_raw.as_ref().map(|line|
-            line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']'))
-                .map(|inner| inner.split(',').any(|t| t.trim() == tag.as_str()))
-                .unwrap_or(false)
-        ).unwrap_or(false);
-        if !has { return false; }
+        if !e.has_tag(tag) { return false; }
     }
     true
 }
@@ -329,13 +322,8 @@ pub fn collect_all_tags(dir: &Path) -> Vec<(String, usize)> {
     crate::cache::with_corpus(dir, |cached| {
         let mut tags: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
         for e in cached {
-            if let Some(ref line) = e.tags_raw {
-                if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
-                    for tag in inner.split(',') {
-                        let t = tag.trim();
-                        if !t.is_empty() { *tags.entry(t.to_string()).or_insert(0) += 1; }
-                    }
-                }
+            for t in e.tags() {
+                *tags.entry(t.to_string()).or_insert(0) += 1;
             }
         }
         let mut sorted: Vec<(String, usize)> = tags.into_iter().collect();

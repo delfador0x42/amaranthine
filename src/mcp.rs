@@ -208,7 +208,7 @@ fn rpc_err(id: Option<&Value>, code: i64, msg: &str) -> Value {
         ("jsonrpc".into(), Value::Str("2.0".into())),
         ("id".into(), id.cloned().unwrap_or(Value::Null)),
         ("error".into(), Value::Obj(vec![
-            ("code".into(), Value::Num(code)),
+            ("code".into(), Value::Num(code as f64)),
             ("message".into(), Value::Str(msg.into())),
         ])),
     ])

@@ -1,6 +1,6 @@
 [package]
 name = "amaranthine"
-version = "5.0.0"
+version = "6.0.0"
 edition = "2021"
 description = "Fast local knowledge base for AI-assisted development"
 

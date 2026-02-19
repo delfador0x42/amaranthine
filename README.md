@@ -1,148 +1,113 @@
 # amaranthine
 
-Persistent knowledge base for AI coding agents. Zero dependencies, ~640KB binary.
+Persistent memory for AI coding agents. Your agent forgets everything between sessions — amaranthine fixes that.
 
-Your coding agent forgets everything between sessions. amaranthine gives it a
-memory that persists — an append-only data log it can store, search, and reconstruct.
+Single-file append-only data store, binary inverted index, BM25 search, 37 MCP tools, zero dependencies.
 
 ## Install
 
+**Requirements:** [Rust toolchain](https://rustup.rs/) (`cargo`) and [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+
 ```bash
-git clone <repo> && cd amaranthine && make install
+git clone https://github.com/talsec/amaranthine.git
+cd amaranthine
+make install
 ```
 
-That's it. `make install` builds the binary, then runs `amaranthine install` which:
-1. Copies the binary to `~/.local/bin/amaranthine`
-2. Codesigns it (macOS — required or taskgate kills it)
-3. Creates `~/.amaranthine/` (where all knowledge lives)
-4. Adds MCP server config to `~/.claude.json`
-5. Adds usage instructions to `~/.claude/CLAUDE.md`
-6. Adds 4 hooks to `~/.claude/settings.json` (ambient context, build reminders, etc.)
+`make install` does everything:
+1. Builds the release binary (~15s)
+2. Copies it to `~/.local/bin/amaranthine` and codesigns it (macOS)
+3. Creates `~/.amaranthine/` for knowledge storage
+4. Registers the MCP server in `~/.claude.json`
+5. Adds agent instructions to `~/.claude/CLAUDE.md`
+6. Installs 4 hooks in `~/.claude/settings.json`
 
-Restart Claude Code. Your agent now has persistent memory.
+**Restart Claude Code.** Your agent now has persistent memory.
 
-**Requirements:** Rust toolchain (`cargo`). No other dependencies.
+> **Note:** The MCP server uses the full binary path, so `~/.local/bin` doesn't need to
+> be on your PATH. Add it if you want CLI access: `export PATH="$HOME/.local/bin:$PATH"`
 
-## What the agent gets
+### Verify it works
 
-37 MCP tools, organized by function:
-
-**Search** — find knowledge across all topics
-| Tool | What it does |
-|------|-------------|
-| `search` | Full-text BM25 search, CamelCase/snake_case splitting, AND→OR fallback |
-| `search_medium` | Topic + timestamp + first 2 lines per hit (default) |
-| `search_brief` | Topic + first matching line per hit |
-| `search_topics` | Which topics matched + hit counts |
-| `search_count` | Just count matches (fastest) |
-| `index_search` | Binary index search (~200ns, auto-rebuilt after writes) |
-
-**Write** — store and modify knowledge
-| Tool | What it does |
-|------|-------------|
-| `store` | Save a timestamped entry under a topic |
-| `batch_store` | Store multiple entries as native JSON array (terse default, intra-batch dedup) |
-| `append` | Add text to the last entry (no new timestamp) |
-| `append_entry` | Add text to a specific entry by match, index, or tag |
-| `update_entry` | Replace an entry's text (keeps timestamp) |
-| `delete_entry` | Remove an entry by match/index/last |
-| `delete_topic` | Delete an entire topic |
-
-**Browse** — explore what's stored
-| Tool | What it does |
-|------|-------------|
-| `context` | Session briefing: topics + recent entries |
-| `topics` | List all topics with entry counts |
-| `recent` | Entries from last N days/hours |
-| `read_topic` | Read all entries in a topic |
-| `digest` | One-bullet summary of every entry |
-| `stats` | Topic count, entry count, date range |
-| `list_tags` | All tags with usage counts |
-| `list_entries` | Entries in a topic with index numbers |
-| `get_entry` | Fetch a single entry by topic + index |
-
-**Analysis** — understand knowledge structure
-| Tool | What it does |
-|------|-------------|
-| `reconstruct` | Architecture query: read matching topics fully, search others for related entries |
-| `search_entity` | Search grouped by topic — full picture per topic |
-| `dep_graph` | Topic dependency graph: which topics reference which |
-| `xref` | Find cross-references between topics |
-| `check_stale` | Find entries whose source files have changed |
-| `refresh_stale` | Show stale entries alongside current source excerpts for easy updating |
-
-**Edit** — reorganize knowledge
-| Tool | What it does |
-|------|-------------|
-| `rename_topic` | Rename a topic (preserves entries) |
-| `merge_topics` | Merge all entries from one topic into another |
-| `tag_entry` | Add or remove tags on an existing entry |
-
-**Maintenance** — keep knowledge clean
-| Tool | What it does |
-|------|-------------|
-| `compact` | Find and merge duplicate entries |
-| `prune` | Flag stale topics (no entries in N days) |
-| `migrate` | Fix entries without timestamps |
-| `export` / `import` | JSON backup and restore |
-| `session` | Show what was stored this session |
-| `rebuild_index` | Rebuild binary inverted index |
-| `index_stats` | Show index and cache statistics |
-| `_reload` | Hot-reload binary after code changes |
-
-## Hooks
-
-amaranthine installs 4 Claude Code hooks globally (`~/.claude/settings.json`):
-
-| Hook | Event | What it does |
-|------|-------|-------------|
-| **ambient** | PreToolUse (all) | Queries index on file stem before Read/Edit/Write, injects relevant entries |
-| **post-build** | PostToolUse (Bash) | After xcodebuild/cargo/swift build, reminds to store findings |
-| **stop** | Stop | Debounced (120s) reminder to persist findings before session ends |
-| **subagent-start** | SubagentStart | Injects dynamic topic list from index into subagents |
-
-Hooks run as `amaranthine hook <type>`, reading JSON from stdin and writing
-hook output to stdout. Typical latency ~5ms (process startup + index read).
-
-## How it works
-
-Knowledge is stored in a single append-only data log:
+Open Claude Code and ask your agent to store something:
 
 ```
-~/.amaranthine/
-  data.log       # all entries + tombstone deletes, single file
-  index.bin      # binary inverted index, rebuilt on write
+Store in amaranthine: "test entry" under topic "test"
 ```
 
-Topics are virtual metadata — each entry has a topic name, but there are no
-per-topic files. Entries are timestamped, tagged, and optionally source-linked.
-Deletes are tombstone records referencing the original entry's byte offset.
+Then in a new session:
 
-Search uses BM25 ranking with a unified tokenizer (CamelCase/snake_case splitting),
-topic-name boost (1.5x), tag-aware scoring (+30% per matching tag), and AND-to-OR
-fallback. Entries with `[source: path:line]` metadata enable staleness detection —
-`check_stale` reports when source files change, `refresh_stale` shows you exactly
-what changed.
+```
+Search amaranthine for "test"
+```
 
-## CLI usage
+If it finds your entry, you're set. Delete the test topic when done.
+
+## What happens
+
+Every session, the agent can:
+
+- **Store** findings as it works — tagged, timestamped, source-linked
+- **Search** across everything it's ever stored — BM25 ranked, AND-to-OR fallback
+- **Reconstruct** full understanding of a topic from stored knowledge (one-shot briefings)
+- **Track staleness** — entries linked to source files know when those files change
+
+Four hooks run automatically in the background:
+
+| Hook | When | What |
+|------|------|------|
+| **ambient** | Before file reads/edits | Injects relevant knowledge from the index |
+| **post-build** | After build commands | Reminds to store findings |
+| **stop** | Session ending | Reminds to persist discoveries |
+| **subagent** | Subagent starting | Injects topic list for context |
+
+## Tools
+
+The agent gets 37 MCP tools, grouped by function:
+
+**Search** — `search` (BM25, with detail levels: full/medium/brief/count/topics), `search_entity` (grouped by topic), `index_search` (binary index, ~200ns)
+
+**Write** — `store` (with optional tags, source links, confidence, narrative links), `batch_store`, `append`, `append_entry`, `update_entry`, `delete`
+
+**Browse** — `context`, `topics`, `recent`, `read_topic`, `digest`, `stats`, `list_tags`, `list_entries`, `get_entry`
+
+**Analysis** — `reconstruct` (compressed briefing with link-following), `search_entity`, `dep_graph`, `xref`, `check_stale`, `refresh_stale`, `codepath`
+
+**Edit** — `rename_topic`, `merge_topics`, `tag_entry`
+
+**Maintenance** — `compact`, `prune`, `migrate`, `export`, `import`, `session`, `rebuild_index`, `index_stats`, `compact_log`, `_reload`
+
+## CLI
+
+amaranthine also works from the command line:
 
 ```bash
 amaranthine store rust-tips "always use #[repr(C)] for FFI structs" --tags rust,ffi
 amaranthine search "FFI"
-amaranthine search "FFI" --brief           # quick results
-amaranthine search "FFI" --topics          # which topics matched
-amaranthine context --brief                # session briefing
-amaranthine recent 3                       # last 3 days
-amaranthine topics                         # list all topics
-amaranthine hook ambient < input.json      # run a hook manually
+amaranthine search "FFI" --brief
+amaranthine context --brief
+amaranthine recent 3
+amaranthine topics
 ```
 
-## Design
+## How it works
 
-- Zero runtime dependencies — hand-rolled JSON parser, arg parsing, libc FFI
-- ~640KB stripped binary, <5s release compile
-- All knowledge in `~/.amaranthine/data.log`, override with `--dir` or `AMARANTHINE_DIR`
-- MCP server speaks JSON-RPC over stdio (`amaranthine serve`)
-- C FFI dylib for ~200ns in-process queries
-- Hooks are CLI invocations, not a daemon — no state between calls
-- See [DESIGN.md](DESIGN.md) for architecture decisions
+All knowledge lives in a single append-only file:
+
+```
+~/.amaranthine/
+  data.log       # entries + tombstone deletes
+  index.bin      # binary inverted index, rebuilt on write
+```
+
+Topics are metadata on entries — no per-topic files. Entries are timestamped and can carry tags (`[tags: rust, ffi]`), source links (`[source: src/main.rs:42]`), confidence levels (`[confidence: 0.8]`), and narrative links (`[links: topic:idx]`) to other entries.
+
+Search uses BM25 with CamelCase/snake_case splitting, topic-name boost, tag-aware scoring, and AND-to-OR fallback. A binary inverted index enables ~200ns queries for the C FFI path (used by hooks).
+
+## Architecture
+
+- Zero runtime dependencies — hand-rolled JSON parser, hasher, binary index, date math
+- 39 Rust files, ~6500 lines, ~1.1MB release binary
+- Three access tiers: C FFI (~200ns), MCP server (~5ms), corpus cache (~0us warm)
+- See [DESIGN.md](DESIGN.md) for architecture details
+- See [CONTRIBUTING.md](CONTRIBUTING.md) for development guide

@@ -14,6 +14,21 @@ pub fn run_full(
     dir: &Path, topic: &str, text: &str, tags: Option<&str>,
     force: bool, source: Option<&str>,
 ) -> Result<String, String> {
+    run_full_ext(dir, topic, text, tags, force, source, None, None)
+}
+
+pub fn run_full_conf(
+    dir: &Path, topic: &str, text: &str, tags: Option<&str>,
+    force: bool, source: Option<&str>, confidence: Option<f64>,
+) -> Result<String, String> {
+    run_full_ext(dir, topic, text, tags, force, source, confidence, None)
+}
+
+pub fn run_full_ext(
+    dir: &Path, topic: &str, text: &str, tags: Option<&str>,
+    force: bool, source: Option<&str>, confidence: Option<f64>,
+    links: Option<&str>,
+) -> Result<String, String> {
     crate::config::ensure_dir(dir)?;
     let _lock = crate::lock::FileLock::acquire(dir)?;
     let text = read_text(text)?;
@@ -21,7 +36,7 @@ pub fn run_full(
 
     // Build body with metadata lines
     let cleaned_tags = tags.map(|t| normalize_tags(t));
-    let body = build_body(&text, cleaned_tags.as_deref(), source);
+    let body = build_body(&text, cleaned_tags.as_deref(), source, confidence, links);
 
     let ts = LocalTime::now();
     let ts_min = ts.to_minutes() as i32;
@@ -35,7 +50,11 @@ pub fn run_full(
     let echo = text.lines().map(|l| format!("  > {l}")).collect::<Vec<_>>().join("\n");
     let tag_echo = cleaned_tags.as_deref().filter(|t| !t.is_empty())
         .map(|t| format!(" [tags: {t}]")).unwrap_or_default();
-    let mut msg = format!("stored in {topic}\n  @ {ts}{tag_echo}\n{echo}");
+    let conf_echo = confidence.filter(|c| *c < 1.0)
+        .map(|c| format!(" (~{:.0}%)", c * 100.0)).unwrap_or_default();
+    let link_echo = links.filter(|l| !l.is_empty())
+        .map(|l| format!(" [links: {l}]")).unwrap_or_default();
+    let mut msg = format!("stored in {topic}\n  @ {ts}{tag_echo}{conf_echo}{link_echo}\n{echo}");
     if let Some(hint) = topic_hint { msg.push_str(&format!("\n  note: {hint}")); }
     if let Some(ref dw) = dupe_warn { msg.push_str(&format!("\n  dupe warning: {dw}")); }
     Ok(msg)
@@ -48,7 +67,7 @@ pub fn run_batch_entry(
     crate::config::ensure_dir(dir)?;
     let log_path = crate::datalog::ensure_log(dir)?;
     let cleaned_tags = tags.map(|t| normalize_tags(t));
-    let body = build_body(text, cleaned_tags.as_deref(), source);
+    let body = build_body(text, cleaned_tags.as_deref(), source, None, None);
     let ts_min = LocalTime::now().to_minutes() as i32;
     crate::datalog::append_entry(&log_path, topic, &body, ts_min)?;
     Ok(format!("stored in {topic}"))
@@ -59,7 +78,7 @@ pub fn run_batch_entry_to(
     f: &mut std::fs::File, topic: &str, text: &str, tags: Option<&str>, source: Option<&str>,
 ) -> Result<String, String> {
     let cleaned_tags = tags.map(|t| normalize_tags(t));
-    let body = build_body(text, cleaned_tags.as_deref(), source);
+    let body = build_body(text, cleaned_tags.as_deref(), source, None, None);
     let ts_min = LocalTime::now().to_minutes() as i32;
     crate::datalog::append_entry_to(f, topic, &body, ts_min)?;
     Ok(format!("stored in {topic}"))
@@ -79,12 +98,19 @@ pub fn append(dir: &Path, topic: &str, text: &str) -> Result<String, String> {
     Ok(format!("appended to last entry in {topic}"))
 }
 
-fn build_body(text: &str, tags: Option<&str>, source: Option<&str>) -> String {
+fn build_body(text: &str, tags: Option<&str>, source: Option<&str>,
+              confidence: Option<f64>, links: Option<&str>) -> String {
     let mut body = String::new();
     if let Some(t) = tags {
         if !t.is_empty() { body.push_str(&format!("[tags: {t}]\n")); }
     }
     if let Some(src) = source { body.push_str(&format!("[source: {src}]\n")); }
+    if let Some(c) = confidence {
+        if c < 1.0 { body.push_str(&format!("[confidence: {c}]\n")); }
+    }
+    if let Some(l) = links {
+        if !l.is_empty() { body.push_str(&format!("[links: {l}]\n")); }
+    }
     body.push_str(text);
     body
 }

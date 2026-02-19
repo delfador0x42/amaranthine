@@ -17,16 +17,12 @@ pub fn export(dir: &Path) -> Result<String, String> {
         for name in &topic_order {
             let group = &grouped[name.as_str()];
             let entries: Vec<Value> = group.iter().map(|e| {
-                let date = crate::time::minutes_to_date_str(e.timestamp_min);
-                let mut tags_list: Vec<Value> = Vec::new();
+                let date = e.date_str();
+                let tags_list: Vec<Value> = e.tags().iter()
+                    .map(|t| Value::Str((*t).into())).collect();
                 let mut body_lines: Vec<&str> = Vec::new();
                 for line in e.body.lines() {
-                    if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
-                        for tag in inner.split(',') {
-                            let t = tag.trim();
-                            if !t.is_empty() { tags_list.push(Value::Str(t.into())); }
-                        }
-                    } else { body_lines.push(line); }
+                    if !line.starts_with("[tags: ") { body_lines.push(line); }
                 }
                 Value::Obj(vec![
                     ("timestamp".into(), Value::Str(date)),

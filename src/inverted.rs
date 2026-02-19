@@ -17,6 +17,7 @@ struct EntryInfo {
     source: String,
     log_offset: u32,
     tags: Vec<String>,
+    explicit_confidence: Option<f64>,
 }
 
 pub struct IndexBuilder {
@@ -63,6 +64,7 @@ impl IndexBuilder {
         self.entries.push(EntryInfo {
             topic_id, word_count: wc.min(u16::MAX as usize) as u16,
             snippet, date_minutes, source, log_offset, tags,
+            explicit_confidence: None,
         });
         entry_id
     }
@@ -71,7 +73,7 @@ impl IndexBuilder {
     pub fn add_entry_with_tokens(
         &mut self, topic_id: u16, snippet: String,
         date_minutes: i32, source: String, log_offset: u32, tags: Vec<String>,
-        tokens: &[String],
+        tokens: &[String], explicit_confidence: Option<f64>,
     ) -> u32 {
         let entry_id = self.entries.len() as u32;
         let wc = tokens.len();
@@ -85,7 +87,7 @@ impl IndexBuilder {
         for tag in &tags { *self.tag_freq.entry(tag.clone()).or_insert(0) += 1; }
         self.entries.push(EntryInfo {
             topic_id, word_count: wc.min(u16::MAX as usize) as u16,
-            snippet, date_minutes, source, log_offset, tags,
+            snippet, date_minutes, source, log_offset, tags, explicit_confidence,
         });
         entry_id
     }
@@ -191,7 +193,11 @@ impl IndexBuilder {
             };
 
             let tag_bitmap = self.entry_tag_bitmap(&info.tags, &tag_to_bit);
-            let confidence = compute_confidence_cached(&info.source, info.date_minutes, &mut mtime_cache);
+            let staleness_conf = compute_confidence_cached(&info.source, info.date_minutes, &mut mtime_cache);
+            let confidence = match info.explicit_confidence {
+                Some(c) => ((c.clamp(0.0, 1.0) * 255.0) as u8).min(staleness_conf),
+                None => staleness_conf,
+            };
             let epoch_days = if info.date_minutes > 0 {
                 (info.date_minutes as u32 / 1440) as u16
             } else { 0 };
@@ -322,9 +328,10 @@ pub fn rebuild(dir: &Path) -> Result<(String, Vec<u8>), String> {
             let source = crate::text::extract_source(&e.body).unwrap_or_default();
             let tags = extract_entry_tags(&e.body);
             let snippet = build_snippet(&e.topic, e.timestamp_min, &e.body);
+            let conf = if e.confidence < 1.0 { Some(e.confidence) } else { None };
             builder.add_entry_with_tokens(
                 tid, snippet, e.timestamp_min, source, e.offset, tags,
-                &e.tokens,
+                &e.tokens, conf,
             );
         }
         let ne = builder.entries.len();
@@ -342,8 +349,11 @@ pub fn rebuild(dir: &Path) -> Result<(String, Vec<u8>), String> {
 
 fn extract_entry_tags(body: &str) -> Vec<String> {
     body.lines()
-        .find_map(|l| l.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')))
-        .map(|inner| inner.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).collect())
+        .find_map(|l| {
+            let tags = crate::text::parse_tags_raw(Some(l));
+            if tags.is_empty() { None }
+            else { Some(tags.iter().map(|t| t.to_lowercase()).collect()) }
+        })
         .unwrap_or_default()
 }
 
@@ -371,6 +381,7 @@ fn build_snippet(topic: &str, ts_min: i32, body: &str) -> String {
     let lines: Vec<&str> = body.lines()
         .filter(|l| !l.starts_with("[tags:") && !l.starts_with("[source:")
             && !l.starts_with("[type:") && !l.starts_with("[modified:")
+            && !l.starts_with("[confidence:") && !l.starts_with("[links:")
             && !l.trim().is_empty())
         .take(2).collect();
     format!("[{}] {} {}", topic, date, lines.join(" ").chars().take(120).collect::<String>())

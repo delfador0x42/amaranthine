@@ -177,7 +177,8 @@ fn format_entry(out: &mut String, e: &Compressed) {
     let lines: Vec<&str> = e.body.lines()
         .filter(|l| !l.starts_with("[tags:") && !l.starts_with("[source:")
             && !l.starts_with("[type:") && !l.starts_with("[modified:")
-            && !l.starts_with("[tier:"))
+            && !l.starts_with("[tier:") && !l.starts_with("[confidence:")
+            && !l.starts_with("[links:"))
         .collect();
     for l in lines.iter().take(5) { let _ = writeln!(out, "  {}", l.trim()); }
     if lines.len() > 5 { let _ = writeln!(out, "  ...({} more lines)", lines.len() - 5); }

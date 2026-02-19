@@ -112,6 +112,6 @@ fn subagent_start(dir: &Path) -> Result<String, String> {
     list.sort();
     Ok(hook_output(&format!(
         "AMARANTHINE KNOWLEDGE STORE: You have access to amaranthine MCP tools. \
-         BEFORE starting work, call mcp__amaranthine__search_medium with keywords \
+         BEFORE starting work, call mcp__amaranthine__search with keywords \
          relevant to your task. Topics: {}", list.join(", "))))
 }

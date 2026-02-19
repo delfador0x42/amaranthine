@@ -141,7 +141,7 @@ pub fn run_grouped(dir: &Path, query: &str, limit_per_topic: Option<usize>, filt
             let header = r.lines.first().map(|s| s.as_str()).unwrap_or("??");
             let _ = write!(out, "  {} — ", header.trim_start_matches("## "));
             if let Some(line) = r.lines.iter().skip(1)
-                .find(|l| !l.starts_with("[tags:") && !l.starts_with("[source:") && !l.starts_with("[type:") && !l.trim().is_empty()) {
+                .find(|l| !l.starts_with("[tags:") && !l.starts_with("[source:") && !l.starts_with("[type:") && !l.starts_with("[confidence:") && !l.starts_with("[links:") && !l.trim().is_empty()) {
                 let _ = writeln!(out, "{}", truncate(line.trim(), 90));
             } else { let _ = writeln!(out); }
         }

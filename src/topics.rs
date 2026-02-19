@@ -45,11 +45,8 @@ struct TopicInfo {
 
 fn collect_tags_from_body(body: &str, tags: &mut std::collections::BTreeSet<String>) {
     for line in body.lines() {
-        if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
-            for tag in inner.split(',') {
-                let t = tag.trim();
-                if !t.is_empty() { tags.insert(t.to_string()); }
-            }
+        for t in crate::text::parse_tags_raw(Some(line)) {
+            tags.insert(t.to_string());
         }
     }
 }
@@ -60,6 +57,7 @@ fn entry_preview(body: &str) -> String {
             let t = l.trim();
             !t.is_empty() && !t.starts_with("[tags:") && !t.starts_with("[source:")
                 && !t.starts_with("[type:") && !t.starts_with("[modified:")
+                && !t.starts_with("[confidence:") && !t.starts_with("[links:")
         })
         .map(|l| {
             let clean = l.trim().trim_start_matches("- ");
@@ -79,8 +77,7 @@ pub fn read_topic(dir: &Path, topic: &str) -> Result<String, String> {
         if group.is_empty() { return Err(format!("topic '{f}' not found")); }
         let mut out = String::new();
         for e in &group {
-            let date = time::minutes_to_date_str(e.timestamp_min);
-            out.push_str(&format!("## {date}\n{}\n\n", e.body.trim()));
+            out.push_str(&format!("## {}\n{}\n\n", e.date_str(), e.body.trim()));
         }
         Ok(out)
     })?
@@ -109,10 +106,10 @@ fn recent_inner(dir: &Path, days: Option<u64>, hours: Option<u64>, plain: bool) 
             let is_recent = if use_minutes {
                 e.timestamp_min as i64 >= cutoff_min
             } else {
-                e.timestamp_min as i64 / 1440 >= cutoff_day
+                e.day() >= cutoff_day
             };
             if !is_recent { continue; }
-            let date = time::minutes_to_date_str(e.timestamp_min);
+            let date = e.date_str();
             if plain {
                 let _ = writeln!(out, "[{}] ## {}", e.topic, date);
             } else {
