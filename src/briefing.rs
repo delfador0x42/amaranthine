@@ -60,7 +60,7 @@ fn write_graph(out: &mut String, entries: &[Compressed], primary: &[String]) {
             if src == tgt { continue; }
             let refs: usize = entries.iter()
                 .filter(|e| e.topic == *src)
-                .map(|e| e.body.to_lowercase().matches(tgt.as_str()).count())
+                .map(|e| count_ci(&e.body, tgt))
                 .sum();
             if refs > 0 { edges.push((src.clone(), tgt.clone(), refs)); }
         }
@@ -207,4 +207,14 @@ fn freshness_tag(days: i64) -> &'static str {
 
 fn freshness_short(days: i64) -> &'static str {
     match days { 0 => ", today", 1 => ", 1d", 2..=7 => ", week", _ => "" }
+}
+
+/// Count case-insensitive substring occurrences without allocation.
+/// Needle must be ASCII lowercase (topic names always are).
+fn count_ci(haystack: &str, needle: &str) -> usize {
+    let nb = needle.as_bytes();
+    if nb.is_empty() || nb.len() > haystack.len() { return 0; }
+    haystack.as_bytes().windows(nb.len())
+        .filter(|w| w.iter().zip(nb).all(|(h, n)| h.to_ascii_lowercase() == *n))
+        .count()
 }

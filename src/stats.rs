@@ -3,126 +3,123 @@ use std::fmt::Write;
 use std::path::Path;
 
 pub fn list_tags(dir: &Path) -> Result<String, String> {
-    let log_path = crate::config::log_path(dir);
-    let entries = crate::datalog::iter_live(&log_path)?;
-    let mut tags: BTreeMap<String, usize> = BTreeMap::new();
-    for e in &entries {
-        for line in e.body.lines() {
-            if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
-                for tag in inner.split(',') {
-                    let t = tag.trim().to_lowercase();
-                    if !t.is_empty() { *tags.entry(t).or_insert(0) += 1; }
+    crate::cache::with_corpus(dir, |cached| {
+        let mut tags: BTreeMap<String, usize> = BTreeMap::new();
+        for e in cached {
+            if let Some(ref line) = e.tags_raw {
+                if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
+                    for tag in inner.split(',') {
+                        let t = tag.trim();
+                        if !t.is_empty() { *tags.entry(t.to_string()).or_insert(0) += 1; }
+                    }
                 }
             }
         }
-    }
-    let mut out = String::new();
-    if tags.is_empty() {
-        let _ = writeln!(out, "no tags found");
-    } else {
-        for (tag, count) in &tags {
-            let _ = writeln!(out, "  {tag:<24} {count} entries");
+        let mut out = String::new();
+        if tags.is_empty() {
+            let _ = writeln!(out, "no tags found");
+        } else {
+            for (tag, count) in &tags {
+                let _ = writeln!(out, "  {tag:<24} {count} entries");
+            }
+            let _ = writeln!(out, "\n{} unique tags across {} entries", tags.len(), tags.values().sum::<usize>());
         }
-        let _ = writeln!(out, "\n{} unique tags across {} entries", tags.len(), tags.values().sum::<usize>());
-    }
-    Ok(out)
+        out
+    })
 }
 
 pub fn stats(dir: &Path) -> Result<String, String> {
-    let log_path = crate::config::log_path(dir);
-    let entries = crate::datalog::iter_live(&log_path)?;
-    let mut topics: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut tags: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut tagged = 0usize;
-    let mut oldest: Option<i32> = None;
-    let mut newest: Option<i32> = None;
-    for e in &entries {
-        topics.insert(e.topic.clone());
-        if e.timestamp_min != 0 {
-            oldest = Some(oldest.map_or(e.timestamp_min, |o: i32| o.min(e.timestamp_min)));
-            newest = Some(newest.map_or(e.timestamp_min, |n: i32| n.max(e.timestamp_min)));
-        }
-        for line in e.body.lines() {
-            if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
-                tagged += 1;
-                for tag in inner.split(',') {
-                    let t = tag.trim().to_lowercase();
-                    if !t.is_empty() { tags.insert(t); }
+    crate::cache::with_corpus(dir, |cached| {
+        let mut topics: crate::fxhash::FxHashSet<&str> = crate::fxhash::FxHashSet::default();
+        let mut tags: crate::fxhash::FxHashSet<String> = crate::fxhash::FxHashSet::default();
+        let mut tagged = 0usize;
+        let mut oldest: Option<i32> = None;
+        let mut newest: Option<i32> = None;
+        for e in cached {
+            topics.insert(&e.topic);
+            if e.timestamp_min != 0 {
+                oldest = Some(oldest.map_or(e.timestamp_min, |o: i32| o.min(e.timestamp_min)));
+                newest = Some(newest.map_or(e.timestamp_min, |n: i32| n.max(e.timestamp_min)));
+            }
+            if let Some(ref line) = e.tags_raw {
+                if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
+                    tagged += 1;
+                    for tag in inner.split(',') {
+                        let t = tag.trim();
+                        if !t.is_empty() { tags.insert(t.to_string()); }
+                    }
                 }
             }
         }
-    }
-    let now_days = crate::time::LocalTime::now().to_days();
-    let mut out = String::new();
-    let _ = writeln!(out, "topics:         {}", topics.len());
-    let _ = writeln!(out, "entries:        {}", entries.len());
-    let _ = writeln!(out, "tagged entries: {tagged}");
-    let _ = writeln!(out, "unique tags:    {}", tags.len());
-    if let (Some(o), Some(n)) = (oldest, newest) {
-        let _ = writeln!(out, "oldest entry:   {} days ago", now_days - o as i64 / 1440);
-        let _ = writeln!(out, "newest entry:   {} days ago", now_days - n as i64 / 1440);
-    }
-    Ok(out)
+        let now_days = crate::time::LocalTime::now().to_days();
+        let mut out = String::new();
+        let _ = writeln!(out, "topics:         {}", topics.len());
+        let _ = writeln!(out, "entries:        {}", cached.len());
+        let _ = writeln!(out, "tagged entries: {tagged}");
+        let _ = writeln!(out, "unique tags:    {}", tags.len());
+        if let (Some(o), Some(n)) = (oldest, newest) {
+            let _ = writeln!(out, "oldest entry:   {} days ago", now_days - o as i64 / 1440);
+            let _ = writeln!(out, "newest entry:   {} days ago", now_days - n as i64 / 1440);
+        }
+        out
+    })
 }
 
 pub fn check_stale(dir: &Path) -> Result<String, String> {
-    let log_path = crate::config::log_path(dir);
-    if !log_path.exists() { return Err("no data.log found".into()); }
-    let entries = crate::datalog::iter_live(&log_path)?;
-    let mut stale = Vec::new();
-    let mut checked = 0usize;
-    for e in &entries {
-        let lines: Vec<&str> = e.body.lines().collect();
-        if let Some((ref src_path, _)) = crate::config::parse_source(&lines) {
-            checked += 1;
-            let date = crate::time::minutes_to_date_str(e.timestamp_min);
-            if let Some(msg) = crate::config::check_staleness(src_path, &date) {
-                let preview = lines.iter()
-                    .find(|l| !l.starts_with('[') && !l.trim().is_empty())
-                    .map(|l| l.trim()).unwrap_or("");
-                let short = if preview.len() > 60 { &preview[..60] } else { preview };
-                stale.push(format!("  [{}] {date}: {msg}\n    {short}", e.topic));
+    crate::cache::with_corpus(dir, |cached| {
+        let mut stale = Vec::new();
+        let mut checked = 0usize;
+        for e in cached {
+            let lines: Vec<&str> = e.body.lines().collect();
+            if let Some((ref src_path, _)) = crate::config::parse_source(&lines) {
+                checked += 1;
+                let date = crate::time::minutes_to_date_str(e.timestamp_min);
+                if let Some(msg) = crate::config::check_staleness(src_path, &date) {
+                    let preview = lines.iter()
+                        .find(|l| !l.starts_with('[') && !l.trim().is_empty())
+                        .map(|l| l.trim()).unwrap_or("");
+                    let short = if preview.len() > 60 { &preview[..60] } else { preview };
+                    stale.push(format!("  [{}] {date}: {msg}\n    {short}", e.topic));
+                }
             }
         }
-    }
-    if stale.is_empty() {
-        Ok(format!("checked {checked} sourced entries: all fresh"))
-    } else {
-        Ok(format!("{} stale of {checked} sourced entries:\n{}", stale.len(), stale.join("\n")))
-    }
+        if stale.is_empty() {
+            format!("checked {checked} sourced entries: all fresh")
+        } else {
+            format!("{} stale of {checked} sourced entries:\n{}", stale.len(), stale.join("\n"))
+        }
+    })
 }
 
 /// For each stale entry, show the full entry text alongside the current source excerpt.
-/// Returns actionable output: you can see what changed and update the entry immediately.
 pub fn refresh_stale(dir: &Path) -> Result<String, String> {
-    let log_path = crate::config::log_path(dir);
-    if !log_path.exists() { return Err("no data.log found".into()); }
-    let entries = crate::datalog::iter_live(&log_path)?;
-    let mut out = String::new();
-    let mut stale_count = 0usize;
-    let mut checked = 0usize;
-    for e in &entries {
-        let lines: Vec<&str> = e.body.lines().collect();
-        let (src_path, src_line) = match crate::config::parse_source(&lines) {
-            Some(pair) => pair,
-            None => continue,
-        };
-        checked += 1;
-        let date = crate::time::minutes_to_date_str(e.timestamp_min);
-        if crate::config::check_staleness(&src_path, &date).is_none() { continue; }
-        stale_count += 1;
-        let _ = writeln!(out, "--- STALE [{stale_count}] topic={} (written: {date}) ---", e.topic);
-        for line in &lines { let _ = writeln!(out, "  {line}"); }
-        let _ = writeln!(out, "--- CURRENT SOURCE: {} ---", src_path);
-        let _ = writeln!(out, "{}", source_excerpt(&src_path, src_line, 10));
-        let _ = writeln!(out);
-    }
-    if stale_count == 0 {
-        Ok(format!("checked {checked} sourced entries: all fresh"))
-    } else {
-        let _ = write!(out, "{stale_count} stale of {checked} sourced entries");
-        Ok(out)
-    }
+    crate::cache::with_corpus(dir, |cached| {
+        let mut out = String::new();
+        let mut stale_count = 0usize;
+        let mut checked = 0usize;
+        for e in cached {
+            let lines: Vec<&str> = e.body.lines().collect();
+            let (src_path, src_line) = match crate::config::parse_source(&lines) {
+                Some(pair) => pair,
+                None => continue,
+            };
+            checked += 1;
+            let date = crate::time::minutes_to_date_str(e.timestamp_min);
+            if crate::config::check_staleness(&src_path, &date).is_none() { continue; }
+            stale_count += 1;
+            let _ = writeln!(out, "--- STALE [{stale_count}] topic={} (written: {date}) ---", e.topic);
+            for line in &lines { let _ = writeln!(out, "  {line}"); }
+            let _ = writeln!(out, "--- CURRENT SOURCE: {} ---", src_path);
+            let _ = writeln!(out, "{}", source_excerpt(&src_path, src_line, 10));
+            let _ = writeln!(out);
+        }
+        if stale_count == 0 {
+            format!("checked {checked} sourced entries: all fresh")
+        } else {
+            let _ = write!(out, "{stale_count} stale of {checked} sourced entries");
+            out
+        }
+    })
 }
 
 fn source_excerpt(path: &str, line: Option<usize>, radius: usize) -> String {

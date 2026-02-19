@@ -296,6 +296,7 @@ pub fn topic_table(data: &[u8]) -> Result<Vec<(u16, String, u16)>, String> {
     Ok(out)
 }
 
+#[inline]
 pub fn topic_name(data: &[u8], topic_id: u16) -> Result<String, String> {
     let hdr = read_header(data)?;
     let top_off = { hdr.topics_off } as usize;
@@ -347,6 +348,57 @@ pub fn sourced_entries(data: &[u8]) -> Result<Vec<SourcedHit>, String> {
         });
     }
     Ok(out)
+}
+
+/// Reconstruct "[tags: x, y, z]" line from tag_bitmap + tag names section.
+/// Returns None if no tags set. Zero data.log I/O.
+pub fn reconstruct_tags(data: &[u8], entry_id: u32) -> Result<Option<String>, String> {
+    let hdr = read_header(data)?;
+    let meta_off = { hdr.meta_off } as usize;
+    let n = { hdr.num_entries } as usize;
+    if entry_id as usize >= n { return Err("entry_id out of range".into()); }
+    let m = read_at::<EntryMeta>(data, meta_off + entry_id as usize * std::mem::size_of::<EntryMeta>())?;
+    let bitmap = { m.tag_bitmap };
+    if bitmap == 0 { return Ok(None); }
+    let tag_names = read_tag_names(data, &hdr)?;
+    let mut tags = Vec::new();
+    for (bit, name) in tag_names.iter().enumerate() {
+        if bitmap & (1u32 << bit) != 0 { tags.push(name.as_str()); }
+    }
+    if tags.is_empty() { return Ok(None); }
+    Ok(Some(format!("[tags: {}]", tags.join(", "))))
+}
+
+/// Read all tag names from the tag_names section.
+fn read_tag_names(data: &[u8], hdr: &Header) -> Result<Vec<String>, String> {
+    let off = { hdr.tag_names_off } as usize;
+    if off >= data.len() { return Ok(Vec::new()); }
+    let count = data[off] as usize;
+    let mut pos = off + 1;
+    let mut names = Vec::with_capacity(count);
+    for _ in 0..count {
+        if pos >= data.len() { break; }
+        let len = data[pos] as usize;
+        pos += 1;
+        if pos + len > data.len() { break; }
+        names.push(std::str::from_utf8(&data[pos..pos + len]).unwrap_or("").to_string());
+        pos += len;
+    }
+    Ok(names)
+}
+
+/// Read snippet string for an entry directly from index.
+pub fn entry_snippet(data: &[u8], entry_id: u32) -> Result<String, String> {
+    let hdr = read_header(data)?;
+    let meta_off = { hdr.meta_off } as usize;
+    let snip_off = { hdr.snippet_off } as usize;
+    let n = { hdr.num_entries } as usize;
+    if entry_id as usize >= n { return Err("entry_id out of range".into()); }
+    let m = read_at::<EntryMeta>(data, meta_off + entry_id as usize * std::mem::size_of::<EntryMeta>())?;
+    let s_off = snip_off + { m.snippet_off } as usize;
+    let s_len = { m.snippet_len } as usize;
+    if s_off + s_len > data.len() { return Ok(String::new()); }
+    Ok(std::str::from_utf8(&data[s_off..s_off + s_len]).unwrap_or("").to_string())
 }
 
 pub fn entry_log_offset(data: &[u8], entry_id: u32) -> Result<u32, String> {

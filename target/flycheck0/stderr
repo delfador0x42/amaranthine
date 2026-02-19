@@ -1,1 +1,70 @@
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s
+   0.020031458s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="amaranthine"}: cargo::core::compiler::fingerprint: stale: changed "/Users/tal/wudan/dojo/crash3/amaranthine/src/cache.rs"
+   0.020040541s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="amaranthine"}: cargo::core::compiler::fingerprint:           (vs) "/Users/tal/wudan/dojo/crash3/amaranthine/target/debug/.fingerprint/amaranthine-0491e66658006e7d/dep-lib-amaranthine"
+   0.020043208s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="amaranthine"}: cargo::core::compiler::fingerprint:                FileTime { seconds: 1771516655, nanos: 895967712 } < FileTime { seconds: 1771516793, nanos: 774479154 }
+   0.020088750s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="amaranthine"}: cargo::core::compiler::fingerprint: fingerprint dirty for amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine)/Check { test: false }/TargetInner { ..: lib_target("amaranthine", ["lib", "cdylib", "staticlib"], "/Users/tal/wudan/dojo/crash3/amaranthine/src/lib.rs", Edition2021) }
+   0.020097500s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="amaranthine"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: "/Users/tal/wudan/dojo/crash3/amaranthine/target/debug/.fingerprint/amaranthine-0491e66658006e7d/dep-lib-amaranthine", reference_mtime: FileTime { seconds: 1771516655, nanos: 895967712 }, stale: "/Users/tal/wudan/dojo/crash3/amaranthine/src/cache.rs", stale_mtime: FileTime { seconds: 1771516793, nanos: 774479154 } }))
+   0.020248833s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="amaranthine"}: cargo::core::compiler::fingerprint: stale: changed "/Users/tal/wudan/dojo/crash3/amaranthine/src/inverted.rs"
+   0.020251125s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="amaranthine"}: cargo::core::compiler::fingerprint:           (vs) "/Users/tal/wudan/dojo/crash3/amaranthine/target/debug/.fingerprint/amaranthine-2dae20b112425d71/dep-test-lib-amaranthine"
+   0.020252458s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="amaranthine"}: cargo::core::compiler::fingerprint:                FileTime { seconds: 1771516655, nanos: 895973296 } < FileTime { seconds: 1771516755, nanos: 557504785 }
+   0.020284250s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="amaranthine"}: cargo::core::compiler::fingerprint: fingerprint dirty for amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine)/Check { test: true }/TargetInner { ..: lib_target("amaranthine", ["lib", "cdylib", "staticlib"], "/Users/tal/wudan/dojo/crash3/amaranthine/src/lib.rs", Edition2021) }
+   0.020288000s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="amaranthine"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: "/Users/tal/wudan/dojo/crash3/amaranthine/target/debug/.fingerprint/amaranthine-2dae20b112425d71/dep-test-lib-amaranthine", reference_mtime: FileTime { seconds: 1771516655, nanos: 895973296 }, stale: "/Users/tal/wudan/dojo/crash3/amaranthine/src/inverted.rs", stale_mtime: FileTime { seconds: 1771516755, nanos: 557504785 } }))
+   0.020387125s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="amaranthine"}: cargo::core::compiler::fingerprint: fingerprint dirty for amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine)/Check { test: false }/TargetInner { name: "amaranthine", doc: true, ..: with_path("/Users/tal/wudan/dojo/crash3/amaranthine/src/main.rs", Edition2021) }
+   0.020391000s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="amaranthine"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { name: "amaranthine" })
+   0.020506500s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="amaranthine"}: cargo::core::compiler::fingerprint: fingerprint dirty for amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine)/Check { test: true }/TargetInner { name: "amaranthine", doc: true, ..: with_path("/Users/tal/wudan/dojo/crash3/amaranthine/src/main.rs", Edition2021) }
+   0.020509833s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="amaranthine"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { name: "amaranthine" })
+   0.020630708s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="perf"}: cargo::core::compiler::fingerprint: fingerprint error for amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine)/Check { test: true }/TargetInner { kind: "bench", name: "perf", tested: false, ..: with_path("/Users/tal/wudan/dojo/crash3/amaranthine/benches/perf.rs", Edition2021) }
+   0.020634541s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="perf"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/tal/wudan/dojo/crash3/amaranthine/target/debug/.fingerprint/amaranthine-ce8e76f2532164f4/test-bench-perf`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   7: cargo::ops::cargo_compile::compile_ws
+   8: cargo::ops::cargo_compile::compile_with_exec
+   9: cargo::ops::cargo_compile::compile
+  10: cargo::commands::check::exec
+  11: <cargo::cli::Exec>::exec
+  12: cargo::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  14: std::rt::lang_start::<()>::{closure#0}
+  15: std::rt::lang_start_internal
+  16: _main
+   0.022684833s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="profile_burst"}: cargo::core::compiler::fingerprint: fingerprint error for amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine)/Check { test: true }/TargetInner { kind: "bench", name: "profile_burst", tested: false, ..: with_path("/Users/tal/wudan/dojo/crash3/amaranthine/benches/profile_burst.rs", Edition2021) }
+   0.022688458s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="profile_burst"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/tal/wudan/dojo/crash3/amaranthine/target/debug/.fingerprint/amaranthine-36a2dc4a75f756c6/test-bench-profile_burst`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   7: cargo::ops::cargo_compile::compile_ws
+   8: cargo::ops::cargo_compile::compile_with_exec
+   9: cargo::ops::cargo_compile::compile
+  10: cargo::commands::check::exec
+  11: <cargo::cli::Exec>::exec
+  12: cargo::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  14: std::rt::lang_start::<()>::{closure#0}
+  15: std::rt::lang_start_internal
+  16: _main
+   0.022849291s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="bench"}: cargo::core::compiler::fingerprint: fingerprint dirty for amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine)/Check { test: false }/TargetInner { kind: "example", name: "bench", tested: false, benched: false, ..: with_path("/Users/tal/wudan/dojo/crash3/amaranthine/examples/bench.rs", Edition2021) }
+   0.022854250s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="bench"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { name: "amaranthine" })
+   0.023002125s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="burst"}: cargo::core::compiler::fingerprint: fingerprint dirty for amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine)/Check { test: false }/TargetInner { kind: "example", name: "burst", tested: false, benched: false, ..: with_path("/Users/tal/wudan/dojo/crash3/amaranthine/examples/burst.rs", Edition2021) }
+   0.023005666s  INFO prepare_target{force=false package_id=amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine) target="burst"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { name: "amaranthine" })
+    Checking amaranthine v5.0.0 (/Users/tal/wudan/dojo/crash3/amaranthine)
+error: could not compile `amaranthine` (bench "profile_burst") due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `amaranthine` (bench "perf") due to 5 previous errors

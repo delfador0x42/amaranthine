@@ -1,52 +1,51 @@
 use crate::json::Value;
 use std::path::Path;
 
-/// Export all topics as structured JSON from data.log.
+/// Export all topics as structured JSON from cached corpus.
 pub fn export(dir: &Path) -> Result<String, String> {
-    let log_path = crate::config::log_path(dir);
-    let entries = crate::datalog::iter_live(&log_path)?;
+    crate::cache::with_corpus(dir, |cached| {
+        // Group by topic, preserving insertion order
+        let mut topic_order: Vec<String> = Vec::new();
+        let mut grouped: std::collections::BTreeMap<&str, Vec<&crate::cache::CachedEntry>> =
+            std::collections::BTreeMap::new();
+        for e in cached {
+            if !grouped.contains_key(e.topic.as_str()) { topic_order.push(e.topic.to_string()); }
+            grouped.entry(e.topic.as_str()).or_default().push(e);
+        }
 
-    // Group by topic, preserving insertion order
-    let mut topic_order: Vec<String> = Vec::new();
-    let mut grouped: std::collections::BTreeMap<String, Vec<&crate::datalog::LogEntry>> =
-        std::collections::BTreeMap::new();
-    for e in &entries {
-        if !grouped.contains_key(&e.topic) { topic_order.push(e.topic.clone()); }
-        grouped.entry(e.topic.clone()).or_default().push(e);
-    }
+        let mut topics: Vec<Value> = Vec::new();
+        for name in &topic_order {
+            let group = &grouped[name.as_str()];
+            let entries: Vec<Value> = group.iter().map(|e| {
+                let date = crate::time::minutes_to_date_str(e.timestamp_min);
+                let mut tags_list: Vec<Value> = Vec::new();
+                let mut body_lines: Vec<&str> = Vec::new();
+                for line in e.body.lines() {
+                    if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
+                        for tag in inner.split(',') {
+                            let t = tag.trim();
+                            if !t.is_empty() { tags_list.push(Value::Str(t.into())); }
+                        }
+                    } else { body_lines.push(line); }
+                }
+                Value::Obj(vec![
+                    ("timestamp".into(), Value::Str(date)),
+                    ("tags".into(), Value::Arr(tags_list)),
+                    ("body".into(), Value::Str(body_lines.join("\n").trim().to_string())),
+                ])
+            }).collect();
+            topics.push(Value::Obj(vec![
+                ("topic".into(), Value::Str(name.clone())),
+                ("entries".into(), Value::Arr(entries)),
+            ]));
+        }
 
-    let mut topics: Vec<Value> = Vec::new();
-    for name in &topic_order {
-        let group = &grouped[name];
-        let entries: Vec<Value> = group.iter().map(|e| {
-            let date = crate::time::minutes_to_date_str(e.timestamp_min);
-            let mut tags_list: Vec<Value> = Vec::new();
-            let mut body_lines: Vec<&str> = Vec::new();
-            for line in e.body.lines() {
-                if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
-                    for tag in inner.split(',') {
-                        let t = tag.trim();
-                        if !t.is_empty() { tags_list.push(Value::Str(t.into())); }
-                    }
-                } else { body_lines.push(line); }
-            }
-            Value::Obj(vec![
-                ("timestamp".into(), Value::Str(date)),
-                ("tags".into(), Value::Arr(tags_list)),
-                ("body".into(), Value::Str(body_lines.join("\n").trim().to_string())),
-            ])
-        }).collect();
-        topics.push(Value::Obj(vec![
-            ("topic".into(), Value::Str(name.clone())),
-            ("entries".into(), Value::Arr(entries)),
-        ]));
-    }
-
-    let root = Value::Obj(vec![
-        ("version".into(), Value::Str("4.0.0".into())),
-        ("topics".into(), Value::Arr(topics)),
-    ]);
-    Ok(root.pretty())
+        let root = Value::Obj(vec![
+            ("version".into(), Value::Str("4.0.0".into())),
+            ("topics".into(), Value::Arr(topics)),
+        ]);
+        root.pretty()
+    })
 }
 
 /// Import topics from JSON (merges with existing — does not overwrite).

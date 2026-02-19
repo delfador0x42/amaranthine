@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use crate::format::*;
+use crate::fxhash::{FxHashMap, FxHashSet};
 
 // --- Index Builder ---
 
@@ -49,7 +50,7 @@ impl IndexBuilder {
         let wc = tokens.len();
         self.total_words += wc;
 
-        let mut tf_map: HashMap<&str, u16> = HashMap::new();
+        let mut tf_map: FxHashMap<&str, u16> = FxHashMap::default();
         for t in &tokens { *tf_map.entry(t.as_str()).or_insert(0) += 1; }
 
         for (term, tf) in tf_map {
@@ -68,14 +69,14 @@ impl IndexBuilder {
 
     /// Like add_entry but accepts pre-computed tokens (skips tokenize call).
     pub fn add_entry_with_tokens(
-        &mut self, topic_id: u16, _text_lower: &str, snippet: String,
+        &mut self, topic_id: u16, snippet: String,
         date_minutes: i32, source: String, log_offset: u32, tags: Vec<String>,
         tokens: &[String],
     ) -> u32 {
         let entry_id = self.entries.len() as u32;
         let wc = tokens.len();
         self.total_words += wc;
-        let mut tf_map: HashMap<&str, u16> = HashMap::new();
+        let mut tf_map: FxHashMap<&str, u16> = FxHashMap::default();
         for t in tokens { *tf_map.entry(t.as_str()).or_insert(0) += 1; }
         for (term, tf) in tf_map {
             if term.is_empty() || term.len() < 2 { continue; }
@@ -91,8 +92,7 @@ impl IndexBuilder {
 
     /// F11: Xref detection via term index — O(topics × avg_posting) instead of O(entries × topics).
     fn compute_xrefs(&self) -> Vec<XrefEdge> {
-        use std::collections::HashSet;
-        let mut edges: HashMap<(u16, u16), u16> = HashMap::new();
+        let mut edges: FxHashMap<(u16, u16), u16> = FxHashMap::default();
 
         for (i, name) in self.topics.iter().enumerate() {
             let dst = i as u16;
@@ -102,16 +102,16 @@ impl IndexBuilder {
             if name_tokens.is_empty() { continue; }
 
             // Intersect posting lists for all tokens of this topic name
-            let mut candidates: Option<HashSet<u32>> = None;
+            let mut candidates: Option<FxHashSet<u32>> = None;
             for token in &name_tokens {
                 if let Some(postings) = self.terms.get(*token) {
-                    let ids: HashSet<u32> = postings.iter().map(|(eid, _)| *eid).collect();
+                    let ids: FxHashSet<u32> = postings.iter().map(|(eid, _)| *eid).collect();
                     candidates = Some(match candidates {
                         Some(prev) => prev.intersection(&ids).copied().collect(),
                         None => ids,
                     });
                 } else {
-                    candidates = Some(HashSet::new());
+                    candidates = Some(FxHashSet::default());
                     break;
                 }
             }
@@ -319,12 +319,11 @@ pub fn rebuild(dir: &Path) -> Result<(String, Vec<u8>), String> {
         let mut builder = IndexBuilder::new();
         for e in cached {
             let tid = builder.add_topic(&e.topic);
-            let text_lower = e.body.to_lowercase();
             let source = crate::text::extract_source(&e.body).unwrap_or_default();
             let tags = extract_entry_tags(&e.body);
             let snippet = build_snippet(&e.topic, e.timestamp_min, &e.body);
             builder.add_entry_with_tokens(
-                tid, &text_lower, snippet, e.timestamp_min, source, e.offset, tags,
+                tid, snippet, e.timestamp_min, source, e.offset, tags,
                 &e.tokens,
             );
         }

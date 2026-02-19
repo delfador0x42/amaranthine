@@ -10,7 +10,7 @@ pub fn run(dir: &Path, query: &str, plain: bool, limit: Option<usize>, filter: &
            index_data: Option<&[u8]>) -> Result<String, String> {
     let terms = query_terms(query);
     if terms.is_empty() && !filter.is_active() { return Err("provide a query or filter".into()); }
-    let (results, fallback) = crate::score::search_scored(dir, &terms, filter, limit, index_data)?;
+    let (results, fallback) = crate::score::search_scored(dir, &terms, filter, limit, index_data, true)?;
     let total = results.len();
     let show = limit.map(|l| total.min(l)).unwrap_or(total);
 
@@ -41,7 +41,7 @@ pub fn run_brief(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter,
                  index_data: Option<&[u8]>) -> Result<String, String> {
     let terms = query_terms(query);
     if terms.is_empty() && !filter.is_active() { return Err("provide a query or filter".into()); }
-    let (results, fallback) = crate::score::search_scored(dir, &terms, filter, limit, index_data)?;
+    let (results, fallback) = crate::score::search_scored(dir, &terms, filter, limit, index_data, false)?;
     let total = results.len();
     let show = limit.map(|l| total.min(l)).unwrap_or(total);
     let mut out = String::new();
@@ -64,7 +64,7 @@ pub fn run_medium(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter
                   index_data: Option<&[u8]>) -> Result<String, String> {
     let terms = query_terms(query);
     if terms.is_empty() && !filter.is_active() { return Err("provide a query or filter".into()); }
-    let (results, fallback) = crate::score::search_scored(dir, &terms, filter, limit, index_data)?;
+    let (results, fallback) = crate::score::search_scored(dir, &terms, filter, limit, index_data, false)?;
     let total = results.len();
     let show = limit.map(|l| total.min(l)).unwrap_or(total);
     let mut out = String::new();
@@ -94,19 +94,7 @@ pub fn run_medium(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter
 pub fn run_topics(dir: &Path, query: &str, filter: &Filter) -> Result<String, String> {
     let terms = query_terms(query);
     if terms.is_empty() && !filter.is_active() { return Err("provide a query or filter".into()); }
-    // Topics/count needs per-entry matching, use corpus scan
-    let corpus = crate::score::load_corpus(dir, filter)?;
-    let count_fn = |mode: SearchMode| -> Vec<(String, usize)> {
-        let mut hits: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-        for ps in &corpus { if crate::score::matches_tokens(&ps.token_set, &terms, mode) { *hits.entry(ps.name.clone()).or_insert(0) += 1; } }
-        hits.into_iter().collect()
-    };
-    let mut hits = count_fn(filter.mode);
-    let mut fallback = false;
-    if hits.is_empty() && filter.mode == SearchMode::And && terms.len() >= 2 {
-        hits = count_fn(SearchMode::Or);
-        fallback = !hits.is_empty();
-    }
+    let (hits, fallback) = crate::score::topic_matches_cached(dir, &terms, filter)?;
     let total: usize = hits.iter().map(|(_, n)| n).sum();
     let mut out = String::new();
     if hits.is_empty() { out.push_str(&no_match_message(query, filter, dir)); }
@@ -121,27 +109,20 @@ pub fn run_topics(dir: &Path, query: &str, filter: &Filter) -> Result<String, St
 pub fn count(dir: &Path, query: &str, filter: &Filter) -> Result<String, String> {
     let terms = query_terms(query);
     if terms.is_empty() && !filter.is_active() { return Err("provide a query or filter".into()); }
-    // Count needs per-entry matching, use corpus scan
-    let corpus = crate::score::load_corpus(dir, filter)?;
-    let do_count = |mode: SearchMode| -> (usize, usize) {
-        let mut total = 0; let mut topics = std::collections::HashSet::new();
-        for ps in &corpus { if crate::score::matches_tokens(&ps.token_set, &terms, mode) { total += 1; topics.insert(ps.name.clone()); } }
-        (total, topics.len())
-    };
-    let (total, topics) = do_count(filter.mode);
-    if total > 0 { return Ok(format!("{total} matches across {topics} topics for '{query}'")); }
-    if filter.mode == SearchMode::And && terms.len() >= 2 {
-        let (total, topics) = do_count(SearchMode::Or);
-        if total > 0 { return Ok(format!("(OR fallback) {total} matches across {topics} topics for '{query}'")); }
+    let (total, topics, fallback) = crate::score::count_on_cache(dir, &terms, filter)?;
+    if total > 0 {
+        let prefix = if fallback { "(OR fallback) " } else { "" };
+        Ok(format!("{prefix}{total} matches across {topics} topics for '{query}'"))
+    } else {
+        Ok(format!("0 matches for '{query}'"))
     }
-    Ok(format!("0 matches for '{query}'"))
 }
 
 pub fn run_grouped(dir: &Path, query: &str, limit_per_topic: Option<usize>, filter: &Filter,
                    index_data: Option<&[u8]>) -> Result<String, String> {
     let terms = query_terms(query);
     if terms.is_empty() { return Err("query required for entity search".into()); }
-    let (results, fallback) = crate::score::search_scored(dir, &terms, filter, None, index_data)?;
+    let (results, fallback) = crate::score::search_scored(dir, &terms, filter, None, index_data, true)?;
     if results.is_empty() { return Ok(no_match_message(query, filter, dir)); }
     let cap = limit_per_topic.unwrap_or(5);
     let mut groups: std::collections::BTreeMap<String, Vec<&crate::score::ScoredResult>> = std::collections::BTreeMap::new();
@@ -172,6 +153,7 @@ pub fn run_grouped(dir: &Path, query: &str, limit_per_topic: Option<usize>, filt
 
 /// Case-insensitive substring check without allocation.
 /// Needle must already be lowercase (query_terms guarantees this).
+#[inline]
 fn contains_ci(haystack: &str, needle: &str) -> bool {
     let nb = needle.as_bytes();
     if nb.len() > haystack.len() { return false; }

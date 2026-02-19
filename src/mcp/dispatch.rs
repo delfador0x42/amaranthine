@@ -103,7 +103,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             let detail = arg_str(args, "detail");
             let filter = build_filter(args);
             // F2: Pass cached index data to avoid disk reads
-            let guard = super::INDEX.lock().map_err(|e| e.to_string())?;
+            let guard = super::INDEX.read().map_err(|e| e.to_string())?;
             let idx = guard.as_ref().map(|i| i.data.as_slice());
             let result = match detail.as_str() {
                 "full" => crate::search::run(dir, &query, true, limit, &filter, idx),
@@ -117,7 +117,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             let query = arg_str(args, "query");
             let limit = arg_str(args, "limit").parse::<usize>().ok();
             let filter = build_filter(args);
-            let guard = super::INDEX.lock().map_err(|e| e.to_string())?;
+            let guard = super::INDEX.read().map_err(|e| e.to_string())?;
             let idx = guard.as_ref().map(|i| i.data.as_slice());
             let result = crate::search::run_brief(dir, &query, limit, &filter, idx);
             drop(guard);
@@ -127,7 +127,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             let query = arg_str(args, "query");
             let limit = arg_str(args, "limit").parse::<usize>().ok();
             let filter = build_filter(args);
-            let guard = super::INDEX.lock().map_err(|e| e.to_string())?;
+            let guard = super::INDEX.read().map_err(|e| e.to_string())?;
             let idx = guard.as_ref().map(|i| i.data.as_slice());
             let result = crate::search::run_medium(dir, &query, limit, &filter, idx);
             drop(guard);
@@ -306,7 +306,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             Ok(result)
         }
         "index_stats" => {
-            let guard = super::INDEX.lock().map_err(|e| e.to_string())?;
+            let guard = super::INDEX.read().map_err(|e| e.to_string())?;
             let data = match guard.as_ref() {
                 Some(idx) => std::borrow::Cow::Borrowed(idx.data.as_slice()),
                 None => {
@@ -320,7 +320,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
         "index_search" => {
             let query = arg_str(args, "query");
             let limit = arg_str(args, "limit").parse::<usize>().unwrap_or(10);
-            let guard = super::INDEX.lock().map_err(|e| e.to_string())?;
+            let guard = super::INDEX.read().map_err(|e| e.to_string())?;
             let data = match guard.as_ref() {
                 Some(idx) => std::borrow::Cow::Borrowed(idx.data.as_slice()),
                 None => {
@@ -347,7 +347,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             let query = arg_str(args, "query");
             let limit = arg_str(args, "limit").parse::<usize>().ok();
             let filter = build_filter(args);
-            let guard = super::INDEX.lock().map_err(|e| e.to_string())?;
+            let guard = super::INDEX.read().map_err(|e| e.to_string())?;
             let idx = guard.as_ref().map(|i| i.data.as_slice());
             let result = crate::search::run_grouped(dir, &query, limit, &filter, idx);
             drop(guard);

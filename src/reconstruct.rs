@@ -21,7 +21,7 @@ pub fn run(dir: &Path, query: &str) -> Result<String, String> {
         // Collect matching entries using pre-tokenized token_set
         let mut entries: Vec<RawEntry> = Vec::new();
         for e in cached {
-            let is_primary = primary.iter().any(|p| p == &e.topic);
+            let is_primary = primary.iter().any(|p| e.topic == p.as_str());
             let is_related = !q_terms.is_empty()
                 && q_terms.iter().any(|t| e.token_set.contains(t));
             if !is_primary && !is_related { continue; }
@@ -32,7 +32,7 @@ pub fn run(dir: &Path, query: &str) -> Result<String, String> {
                 relevance += *e.tf_map.get(t).unwrap_or(&0) as f64;
             }
             entries.push(RawEntry {
-                topic: e.topic.clone(), body: e.body.clone(),
+                topic: e.topic.to_string(), body: e.body.clone(),
                 timestamp_min: e.timestamp_min, days_old,
                 tags: extract_tags(&e.body), relevance,
             });

@@ -6,14 +6,14 @@ pub use dispatch::dispatch;
 use crate::json::Value;
 use std::io::{self, BufRead, Write as _};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static SESSION_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 struct ServerIndex { data: Vec<u8> }
 
-static INDEX: Mutex<Option<ServerIndex>> = Mutex::new(None);
+static INDEX: RwLock<Option<ServerIndex>> = RwLock::new(None);
 static INDEX_DIRTY: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn log_session(msg: String) {
@@ -153,15 +153,16 @@ pub(crate) fn load_index(dir: &Path) {
 }
 
 pub(crate) fn store_index(data: Vec<u8>) {
-    if let Ok(mut guard) = INDEX.lock() {
+    if let Ok(mut guard) = INDEX.write() {
         *guard = Some(ServerIndex { data });
     }
 }
 
 /// Borrow cached index data via closure. Returns None if no index loaded.
+/// Uses RwLock read guard — concurrent reads don't block each other.
 pub(crate) fn with_index<F, R>(f: F) -> Option<R>
 where F: FnOnce(&[u8]) -> R {
-    INDEX.lock().ok().and_then(|guard| guard.as_ref().map(|idx| f(&idx.data)))
+    INDEX.read().ok().and_then(|guard| guard.as_ref().map(|idx| f(&idx.data)))
 }
 
 pub(crate) fn after_write(_dir: &Path, _topic: &str) {

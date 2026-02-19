@@ -1,22 +1,12 @@
-//! BM25 scoring engine. Pure scoring + corpus loading, no formatting.
-//! Index-accelerated path with cache-backed corpus fallback.
+//! BM25 scoring engine. Index-accelerated path with cache-backed corpus fallback.
+//! Scores directly on borrowed &CachedEntry — no token_set/tf_map clones.
 //! Tag-filtered queries stay on index path when tag is in top-32 bitmap.
 
-use std::collections::{HashSet, HashMap};
+use crate::fxhash::{FxHashSet, FxHashMap};
 use std::path::Path;
 use std::rc::Rc;
 pub const BM25_K1: f64 = 1.2;
 pub const BM25_B: f64 = 0.75;
-
-/// A prepared section ready for BM25 scoring.
-pub struct PrepSection {
-    pub name: String,
-    pub lines: Rc<Vec<String>>,
-    pub token_set: HashSet<String>,
-    pub tf_map: HashMap<String, usize>,
-    pub word_count: usize,
-    pub tags_raw: Option<String>,
-}
 
 /// A scored search result.
 pub struct ScoredResult {
@@ -46,53 +36,9 @@ impl Filter {
     }
 }
 
-/// Load corpus from cache (mtime-invalidated), applying filters.
-pub fn load_corpus(dir: &Path, filter: &Filter) -> Result<Vec<PrepSection>, String> {
-    crate::cache::with_corpus(dir, |cached| {
-        let mut corpus = Vec::new();
-        for e in cached {
-            if let Some(ref t) = filter.topic { if e.topic != *t { continue; } }
-            if !passes_filter_cached(e, filter) { continue; }
-            let date = crate::time::minutes_to_date_str(e.timestamp_min);
-            let mut lines = vec![format!("## {date}")];
-            let mut tags_raw = None;
-            for line in e.body.lines() {
-                if line.starts_with("[tags: ") { tags_raw = Some(line.to_string()); }
-                lines.push(line.to_string());
-            }
-            corpus.push(PrepSection {
-                name: e.topic.clone(), lines: Rc::new(lines),
-                token_set: e.token_set.clone(), tf_map: e.tf_map.clone(),
-                word_count: e.word_count, tags_raw,
-            });
-        }
-        corpus
-    })
-}
-
-/// Score corpus against query terms. Returns (results, was_fallback).
-pub fn score_corpus(corpus: &[PrepSection], terms: &[String], mode: SearchMode)
-    -> (Vec<ScoredResult>, bool)
-{
-    let n = corpus.len() as f64;
-    let total_words: usize = corpus.iter().map(|s| s.word_count).sum();
-    let avgdl = if corpus.is_empty() { 1.0 } else { total_words as f64 / n };
-    let dfs: Vec<usize> = terms.iter()
-        .map(|t| corpus.iter().filter(|s| s.token_set.contains(t)).count()).collect();
-    let mut results = score_mode(corpus, terms, mode, n, avgdl, &dfs);
-    let mut fallback = false;
-    if results.is_empty() && mode == SearchMode::And && terms.len() >= 2 {
-        results = score_mode(corpus, terms, SearchMode::Or, n, avgdl, &dfs);
-        fallback = !results.is_empty();
-    }
-    if !terms.is_empty() {
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    }
-    (results, fallback)
-}
-
 /// Check if tokens match query terms in given mode. O(terms) via HashSet.
-pub fn matches_tokens(token_set: &HashSet<String>, terms: &[String], mode: SearchMode) -> bool {
+#[inline]
+pub fn matches_tokens(token_set: &FxHashSet<String>, terms: &[String], mode: SearchMode) -> bool {
     if terms.is_empty() { return true; }
     match mode {
         SearchMode::And => terms.iter().all(|t| token_set.contains(t)),
@@ -100,28 +46,121 @@ pub fn matches_tokens(token_set: &HashSet<String>, terms: &[String], mode: Searc
     }
 }
 
-fn score_mode(corpus: &[PrepSection], terms: &[String], mode: SearchMode,
-              n: f64, avgdl: f64, dfs: &[usize]) -> Vec<ScoredResult> {
-    corpus.iter().filter(|ps| matches_tokens(&ps.token_set, terms, mode)).filter_map(|ps| {
-        let len_norm = 1.0 - BM25_B + BM25_B * ps.word_count as f64 / avgdl.max(1.0);
-        let mut score = 0.0;
-        for (i, term) in terms.iter().enumerate() {
-            let tf = *ps.tf_map.get(term).unwrap_or(&0) as f64;
-            if tf == 0.0 { continue; }
-            let df = dfs[i] as f64;
-            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
-            score += idf * (tf * (BM25_K1 + 1.0)) / (tf + BM25_K1 * len_norm);
+/// BM25 score on borrowed cache entries. No token_set/tf_map clones.
+/// Only builds lines (String allocations) for entries that score > 0.
+fn score_cached_mode(entries: &[&crate::cache::CachedEntry], terms: &[String],
+                     mode: SearchMode, n: f64, avgdl: f64, dfs: &[usize])
+    -> Vec<ScoredResult>
+{
+    entries.iter()
+        .filter(|e| matches_tokens(&e.token_set, terms, mode))
+        .filter_map(|e| {
+            let len_norm = 1.0 - BM25_B + BM25_B * e.word_count as f64 / avgdl.max(1.0);
+            let mut score = 0.0;
+            for (i, term) in terms.iter().enumerate() {
+                let tf = *e.tf_map.get(term).unwrap_or(&0) as f64;
+                if tf == 0.0 { continue; }
+                let df = dfs[i] as f64;
+                let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+                score += idf * (tf * (BM25_K1 + 1.0)) / (tf + BM25_K1 * len_norm);
+            }
+            if score == 0.0 { return None; }
+            // Topics are already lowercase (config::sanitize_topic). Tags are already lowercase.
+            debug_assert!(e.topic.chars().all(|c| !c.is_uppercase()));
+            if terms.iter().any(|t| e.topic.contains(t.as_str())) { score *= 1.5; }
+            if let Some(ref tag_line) = e.tags_raw {
+                let tag_hits = terms.iter().filter(|t| tag_line.contains(t.as_str())).count();
+                if tag_hits > 0 { score *= 1.0 + 0.3 * tag_hits as f64; }
+            }
+            let date = crate::time::minutes_to_date_str(e.timestamp_min);
+            let mut lines = vec![format!("## {date}")];
+            for line in e.body.lines() { lines.push(line.to_string()); }
+            Some(ScoredResult { name: e.topic.to_string(), lines: Rc::new(lines), score })
+        })
+        .collect()
+}
+
+/// Score on cache with AND→OR fallback. Borrows token_set/tf_map from cache.
+fn score_on_cache(dir: &Path, terms: &[String], filter: &Filter)
+    -> Result<(Vec<ScoredResult>, bool), String>
+{
+    crate::cache::with_corpus(dir, |cached| {
+        let filtered: Vec<&crate::cache::CachedEntry> = cached.iter()
+            .filter(|e| {
+                if let Some(ref t) = filter.topic { if e.topic != *t { return false; } }
+                passes_filter_cached(e, filter)
+            })
+            .collect();
+        let n = filtered.len() as f64;
+        let total_words: usize = filtered.iter().map(|e| e.word_count).sum();
+        let avgdl = if filtered.is_empty() { 1.0 } else { total_words as f64 / n };
+        let dfs: Vec<usize> = terms.iter()
+            .map(|t| filtered.iter().filter(|e| e.token_set.contains(t)).count()).collect();
+        let mut results = score_cached_mode(&filtered, terms, filter.mode, n, avgdl, &dfs);
+        let mut fallback = false;
+        if results.is_empty() && filter.mode == SearchMode::And && terms.len() >= 2 {
+            results = score_cached_mode(&filtered, terms, SearchMode::Or, n, avgdl, &dfs);
+            fallback = !results.is_empty();
         }
-        if score == 0.0 { return None; }
-        let topic_lower = ps.name.to_lowercase();
-        if terms.iter().any(|t| topic_lower.contains(t.as_str())) { score *= 1.5; }
-        if let Some(ref tag_line) = ps.tags_raw {
-            let tag_lower = tag_line.to_lowercase();
-            let tag_hits = terms.iter().filter(|t| tag_lower.contains(t.as_str())).count();
-            if tag_hits > 0 { score *= 1.0 + 0.3 * tag_hits as f64; }
+        if !terms.is_empty() {
+            results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         }
-        Some(ScoredResult { name: ps.name.clone(), lines: ps.lines.clone(), score })
-    }).collect()
+        (results, fallback)
+    })
+}
+
+/// Count matches per topic directly on cache. Zero clones.
+pub fn topic_matches_cached(dir: &Path, terms: &[String], filter: &Filter)
+    -> Result<(Vec<(String, usize)>, bool), String>
+{
+    crate::cache::with_corpus(dir, |cached| {
+        let count_fn = |mode: SearchMode| -> Vec<(String, usize)> {
+            let mut hits: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+            for e in cached {
+                if let Some(ref t) = filter.topic { if e.topic != *t { continue; } }
+                if !passes_filter_cached(e, filter) { continue; }
+                if matches_tokens(&e.token_set, terms, mode) {
+                    *hits.entry(&e.topic).or_insert(0) += 1;
+                }
+            }
+            hits.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+        };
+        let mut hits = count_fn(filter.mode);
+        let mut fallback = false;
+        if hits.is_empty() && filter.mode == SearchMode::And && terms.len() >= 2 {
+            hits = count_fn(SearchMode::Or);
+            fallback = !hits.is_empty();
+        }
+        (hits, fallback)
+    })
+}
+
+/// Count total matches + unique topics on cache. Zero clones.
+pub fn count_on_cache(dir: &Path, terms: &[String], filter: &Filter)
+    -> Result<(usize, usize, bool), String>
+{
+    crate::cache::with_corpus(dir, |cached| {
+        let do_count = |mode: SearchMode| -> (usize, usize) {
+            let mut total = 0;
+            let mut topics: FxHashSet<&str> = FxHashSet::default();
+            for e in cached {
+                if let Some(ref t) = filter.topic { if e.topic != *t { continue; } }
+                if !passes_filter_cached(e, filter) { continue; }
+                if matches_tokens(&e.token_set, terms, mode) {
+                    total += 1;
+                    topics.insert(&e.topic);
+                }
+            }
+            (total, topics.len())
+        };
+        let (total, topics) = do_count(filter.mode);
+        if total > 0 { return (total, topics, false); }
+        if filter.mode == SearchMode::And && terms.len() >= 2 {
+            let (total, topics) = do_count(SearchMode::Or);
+            return (total, topics, total > 0);
+        }
+        (0, 0, false)
+    })
 }
 
 fn passes_filter_cached(e: &crate::cache::CachedEntry, f: &Filter) -> bool {
@@ -131,10 +170,10 @@ fn passes_filter_cached(e: &crate::cache::CachedEntry, f: &Filter) -> bool {
         if let Some(before) = f.before { if days > before { return false; } }
     }
     if let Some(ref tag) = f.tag {
-        let tl = tag.to_lowercase();
+        // Filter tag and stored tags are already lowercase (store::normalize_tags)
         let has = e.tags_raw.as_ref().map(|line|
             line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']'))
-                .map(|inner| inner.split(',').any(|t| t.trim().to_lowercase() == tl))
+                .map(|inner| inner.split(',').any(|t| t.trim() == tag.as_str()))
                 .unwrap_or(false)
         ).unwrap_or(false);
         if !has { return false; }
@@ -144,14 +183,13 @@ fn passes_filter_cached(e: &crate::cache::CachedEntry, f: &Filter) -> bool {
 
 /// Unified search: tries binary index first, falls back to cached corpus scan.
 /// Tag-filtered queries use index path when tag is in top-32 bitmap.
-/// F2: Accepts pre-cached index data to avoid redundant disk reads.
+/// full_body=false uses index snippets only (no data.log I/O) for brief/medium.
 pub fn search_scored(dir: &Path, terms: &[String], filter: &Filter, limit: Option<usize>,
-                     index_data: Option<&[u8]>)
+                     index_data: Option<&[u8]>, full_body: bool)
     -> Result<(Vec<ScoredResult>, bool), String>
 {
     if terms.is_empty() {
-        let corpus = load_corpus(dir, filter)?;
-        return Ok(score_corpus(&corpus, terms, filter.mode));
+        return score_on_cache(dir, terms, filter);
     }
 
     // Try index path — prefer cached data, fall back to disk read
@@ -169,20 +207,19 @@ pub fn search_scored(dir: &Path, terms: &[String], filter: &Filter, limit: Optio
             Some(tag) => crate::binquery::resolve_tag(data, tag).is_some(),
         };
         if tag_on_index {
-            if let Ok(result) = score_via_index(dir, data, terms, filter, limit) {
+            if let Ok(result) = score_via_index(dir, data, terms, filter, limit, full_body) {
                 return Ok(result);
             }
         }
     }
 
-    // Fallback: cached corpus scan
-    let corpus = load_corpus(dir, filter)?;
-    Ok(score_corpus(&corpus, terms, filter.mode))
+    // Fallback: score on borrowed cache entries (no clone storm)
+    score_on_cache(dir, terms, filter)
 }
 
 /// Score using binary inverted index with FilterPred for pre-scoring elimination.
 fn score_via_index(dir: &Path, index_data: &[u8], terms: &[String],
-                   filter: &Filter, limit: Option<usize>)
+                   filter: &Filter, limit: Option<usize>, full_body: bool)
     -> Result<(Vec<ScoredResult>, bool), String>
 {
     let pred = build_filter_pred(index_data, filter);
@@ -191,15 +228,14 @@ fn score_via_index(dir: &Path, index_data: &[u8], terms: &[String],
     let hits = crate::binquery::search_v2_filtered(index_data, &query_str, &pred, index_limit)?;
 
     if hits.is_empty() && filter.mode == SearchMode::And && terms.len() >= 2 {
-        // F-OR: Try OR on index before expensive corpus fallback (5.35ms → ~10µs)
         let or_hits = crate::binquery::search_v2_or(index_data, &query_str, &pred, index_limit)?;
         if !or_hits.is_empty() {
-            return hydrate_index_hits(dir, index_data, terms, &or_hits, true);
+            return hydrate_index_hits(dir, index_data, terms, &or_hits, true, full_body);
         }
         return Ok((Vec::new(), false));
     }
 
-    hydrate_index_hits(dir, index_data, terms, &hits, false)
+    hydrate_index_hits(dir, index_data, terms, &hits, false, full_body)
 }
 
 fn build_filter_pred(index_data: &[u8], filter: &Filter) -> crate::binquery::FilterPred {
@@ -217,19 +253,22 @@ fn build_filter_pred(index_data: &[u8], filter: &Filter) -> crate::binquery::Fil
     crate::binquery::FilterPred { topic_id, after_days, before_days, tag_mask }
 }
 
-/// Hydrate index hits into ScoredResults with full entry bodies from data.log.
+/// Hydrate index hits into ScoredResults.
+/// full_body=true: reads data.log for complete entry bodies (for full/grouped output).
+/// full_body=false: uses index snippets + tag bitmap only (zero data.log I/O).
 fn hydrate_index_hits(dir: &Path, index_data: &[u8], terms: &[String],
-                      hits: &[crate::binquery::SearchHit], fallback: bool)
+                      hits: &[crate::binquery::SearchHit], fallback: bool, full_body: bool)
     -> Result<(Vec<ScoredResult>, bool), String>
 {
     if hits.is_empty() { return Ok((Vec::new(), false)); }
 
-    // F10: Lazy topic name cache — only resolve topic_ids we actually hit
-    let mut name_cache: HashMap<u16, String> = HashMap::new();
-    let log_path = crate::config::log_path(dir);
-    let mut log_file = std::fs::File::open(&log_path)
-        .map_err(|e| format!("open data.log: {e}"))?;
-    let mut results = Vec::new();
+    let mut name_cache: FxHashMap<u16, String> = FxHashMap::default();
+    // Only open data.log when full body is needed
+    let mut log_file = if full_body {
+        let log_path = crate::config::log_path(dir);
+        Some(std::fs::File::open(&log_path).map_err(|e| format!("open data.log: {e}"))?)
+    } else { None };
+    let mut results = Vec::with_capacity(hits.len());
 
     for hit in hits {
         let topic_name = match name_cache.get(&hit.topic_id) {
@@ -241,31 +280,45 @@ fn hydrate_index_hits(dir: &Path, index_data: &[u8], terms: &[String],
         };
         let mut score = hit.score;
 
-        // Topic-name boost
-        let topic_lower = topic_name.to_lowercase();
-        if terms.iter().any(|t| topic_lower.contains(t.as_str())) { score *= 1.5; }
+        // Topic-name boost — topic names are already lowercase (config::sanitize_topic)
+        if terms.iter().any(|t| topic_name.contains(t.as_str())) { score *= 1.5; }
 
-        // Fetch full entry body for display + tag boost (single file handle)
-        let entry = crate::datalog::read_entry_from(&mut log_file, hit.log_offset)
-            .unwrap_or(crate::datalog::LogEntry {
-                offset: hit.log_offset, topic: topic_name.clone(),
-                body: String::new(), timestamp_min: hit.date_minutes,
-            });
-
-        // Tag boost
-        for line in entry.body.lines() {
-            if line.starts_with("[tags: ") {
-                let tag_lower = line.to_lowercase();
-                let tag_hits = terms.iter().filter(|t| tag_lower.contains(t.as_str())).count();
-                if tag_hits > 0 { score *= 1.0 + 0.3 * tag_hits as f64; }
-                break;
+        if full_body {
+            // Full hydration: read entry body from data.log
+            let entry = crate::datalog::read_entry_from(log_file.as_mut().unwrap(), hit.log_offset)
+                .unwrap_or(crate::datalog::LogEntry {
+                    offset: hit.log_offset, topic: topic_name.clone(),
+                    body: String::new(), timestamp_min: hit.date_minutes,
+                });
+            // Tag boost from body — tags already stored lowercase
+            for line in entry.body.lines() {
+                if line.starts_with("[tags: ") {
+                    let tag_hits = terms.iter().filter(|t| line.contains(t.as_str())).count();
+                    if tag_hits > 0 { score *= 1.0 + 0.3 * tag_hits as f64; }
+                    break;
+                }
             }
+            let date = crate::time::minutes_to_date_str(entry.timestamp_min);
+            let mut lines = vec![format!("## {date}")];
+            for line in entry.body.lines() { lines.push(line.to_string()); }
+            results.push(ScoredResult { name: topic_name, lines: Rc::new(lines), score });
+        } else {
+            // Light hydration: build lines from index data only (zero data.log I/O)
+            let tag_line = crate::binquery::reconstruct_tags(index_data, hit.entry_id).ok().flatten();
+            // Tag boost from reconstructed bitmap tags — already lowercase
+            if let Some(ref tl) = tag_line {
+                let tag_hits = terms.iter().filter(|t| tl.contains(t.as_str())).count();
+                if tag_hits > 0 { score *= 1.0 + 0.3 * tag_hits as f64; }
+            }
+            let date = crate::time::minutes_to_date_str(hit.date_minutes);
+            let mut lines = vec![format!("## {date}")];
+            if let Some(tl) = tag_line { lines.push(tl); }
+            // Extract content from snippet (strip "[topic] date " prefix)
+            let prefix = format!("[{}] {} ", topic_name, date);
+            let content = hit.snippet.strip_prefix(&prefix).unwrap_or(&hit.snippet);
+            if !content.is_empty() { lines.push(content.to_string()); }
+            results.push(ScoredResult { name: topic_name, lines: Rc::new(lines), score });
         }
-
-        let date = crate::time::minutes_to_date_str(entry.timestamp_min);
-        let mut lines = vec![format!("## {date}")];
-        for line in entry.body.lines() { lines.push(line.to_string()); }
-        results.push(ScoredResult { name: topic_name, lines: Rc::new(lines), score });
     }
     results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     Ok((results, fallback))
@@ -279,8 +332,8 @@ pub fn collect_all_tags(dir: &Path) -> Vec<(String, usize)> {
             if let Some(ref line) = e.tags_raw {
                 if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
                     for tag in inner.split(',') {
-                        let t = tag.trim().to_lowercase();
-                        if !t.is_empty() { *tags.entry(t).or_insert(0) += 1; }
+                        let t = tag.trim();
+                        if !t.is_empty() { *tags.entry(t.to_string()).or_insert(0) += 1; }
                     }
                 }
             }
