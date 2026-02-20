@@ -30,7 +30,11 @@ pub fn format(entries: &[Compressed], query: &str, raw_count: usize,
         query.to_uppercase(), raw_count, entries.len(), n_topics);
     write_topics(&mut out, entries, primary);
     write_graph(&mut out, entries, primary);
-    let used = write_categories(&mut out, entries);
+    let mut used = write_structure(&mut out, entries);
+    let cat_used = write_categories(&mut out, entries, &used);
+    for i in cat_used { used.insert(i); }
+    let dyn_used = write_dynamic_categories(&mut out, entries, &used);
+    for i in dyn_used { used.insert(i); }
     write_untagged(&mut out, entries, &used, primary);
     write_gaps(&mut out, entries, primary);
     write_stats(&mut out, entries, raw_count);
@@ -62,7 +66,14 @@ fn write_graph(out: &mut String, entries: &[Compressed], primary: &[String]) {
             by_topic.entry(&e.topic).or_default().push(e);
         }
     }
-    let mut edges: Vec<(&str, &str, usize)> = Vec::new();
+    // Collect tags per topic for edge typing
+    let mut topic_tags: BTreeMap<&str, BTreeMap<&str, usize>> = BTreeMap::new();
+    for e in entries {
+        if !primary.iter().any(|p| p == &e.topic) { continue; }
+        let counts = topic_tags.entry(&e.topic).or_default();
+        for t in &e.tags { *counts.entry(t.as_str()).or_default() += 1; }
+    }
+    let mut edges: Vec<(&str, &str, usize, String)> = Vec::new();
     for src in primary {
         let src_entries = match by_topic.get(src.as_str()) {
             Some(v) => v,
@@ -71,27 +82,72 @@ fn write_graph(out: &mut String, entries: &[Compressed], primary: &[String]) {
         for tgt in primary {
             if src == tgt { continue; }
             let refs: usize = src_entries.iter().map(|e| count_ci(&e.body, tgt)).sum();
-            if refs > 0 { edges.push((src, tgt, refs)); }
+            if refs == 0 { continue; }
+            // Edge type: most common shared tag (prefer core tags)
+            let edge_type = topic_tags.get(src.as_str())
+                .and_then(|st| topic_tags.get(tgt.as_str()).map(|tt| (st, tt)))
+                .and_then(|(st, tt)| {
+                    st.keys().filter(|k| tt.contains_key(*k))
+                        .max_by_key(|k| {
+                            let boost = if CORE_TAGS.contains(k) { 100 } else { 0 };
+                            st.get(*k).unwrap_or(&0) + tt.get(*k).unwrap_or(&0) + boost
+                        })
+                        .map(|k| k.to_string())
+                })
+                .unwrap_or_default();
+            edges.push((src, tgt, refs, edge_type));
         }
     }
     edges.sort_by(|a, b| b.2.cmp(&a.2));
     if !edges.is_empty() {
         let _ = write!(out, "GRAPH:");
-        for (s, t, n) in edges.iter().take(6) {
-            let _ = write!(out, " {} → {} ({})", s, t, n);
+        for (s, t, n, etype) in edges.iter().take(6) {
+            if etype.is_empty() {
+                let _ = write!(out, " {} → {} ({})", s, t, n);
+            } else {
+                let _ = write!(out, " {} →[{}] {} ({})", s, etype, t, n);
+            }
         }
         let _ = writeln!(out, "\n");
     }
 }
 
-fn write_categories(out: &mut String, entries: &[Compressed]) -> FxHashSet<usize> {
+fn write_structure(out: &mut String, entries: &[Compressed]) -> FxHashSet<usize> {
+    let mut used: FxHashSet<usize> = FxHashSet::default();
+    let group: Vec<(usize, &Compressed)> = entries.iter().enumerate()
+        .filter(|(_, e)| e.tags.iter().any(|t| t == "raw-data")
+            && e.tags.iter().any(|t| t == "structural" || t == "coupling" || t == "callgraph"))
+        .collect();
+    if group.is_empty() { return used; }
+    for &(i, _) in &group { used.insert(i); }
+    let _ = writeln!(out, "--- STRUCTURE ({}) ---", group.len());
+    for (_, e) in group.iter().take(5) {
+        // Extract ## Summary line from codepath output, or first content line
+        let summary = e.body.lines()
+            .find(|l| l.starts_with("## Summary") || l.starts_with("## "))
+            .or_else(|| e.body.lines().nth(1))
+            .unwrap_or("");
+        let _ = writeln!(out, "  [{}] {}{}", e.topic,
+            crate::text::truncate(summary.trim_start_matches("## ").trim_start_matches("Summary").trim(), 100),
+            freshness_tag(e.days_old));
+    }
+    for (_, e) in group.iter().skip(5).take(5) { format_oneliner(out, e); }
+    if group.len() > 10 {
+        let _ = writeln!(out, "  ... +{} more structural entries", group.len() - 10);
+    }
+    let _ = writeln!(out);
+    used
+}
+
+fn write_categories(out: &mut String, entries: &[Compressed],
+                    pre_used: &FxHashSet<usize>) -> FxHashSet<usize> {
     let mut used: FxHashSet<usize> = FxHashSet::default();
     // Pre-compute lowercased first-content once per entry (not per category × entry)
     let fc_lower: Vec<String> = entries.iter()
         .map(|e| first_content(&e.body).to_lowercase()).collect();
     for &(cat, patterns) in CATEGORIES {
         let group: Vec<(usize, &Compressed)> = entries.iter().enumerate()
-            .filter(|(i, e)| !used.contains(i)
+            .filter(|(i, e)| !used.contains(i) && !pre_used.contains(i)
                 && !e.tags.iter().any(|t| t == "raw-data")
                 && {
                     let tag_match = e.tags.iter().any(|t| patterns.contains(&t.as_str()));
@@ -113,6 +169,43 @@ fn write_categories(out: &mut String, entries: &[Compressed]) -> FxHashSet<usize
         }
     }
     used
+}
+
+/// Dynamic categories: discover high-frequency tags not claimed by hardcoded categories.
+fn write_dynamic_categories(out: &mut String, entries: &[Compressed],
+                            used: &FxHashSet<usize>) -> FxHashSet<usize> {
+    let mut dyn_used: FxHashSet<usize> = FxHashSet::default();
+    // Hardcoded tag set — skip these since they're already handled
+    let static_tags: BTreeSet<&str> = CATEGORIES.iter()
+        .flat_map(|(_, pats)| pats.iter().copied()).collect();
+    // Count tag frequency across unclaimed entries
+    let mut tag_freq: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, e) in entries.iter().enumerate() {
+        if used.contains(&i) || e.tags.iter().any(|t| t == "raw-data") { continue; }
+        for t in &e.tags {
+            if !static_tags.contains(t.as_str()) {
+                tag_freq.entry(t.as_str()).or_default().push(i);
+            }
+        }
+    }
+    // Sort by count descending, take top 5 with 3+ entries
+    let mut dynamic: Vec<(&str, Vec<usize>)> = tag_freq.into_iter()
+        .filter(|(_, v)| v.len() >= 3).collect();
+    dynamic.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    for (tag, indices) in dynamic.iter().take(5) {
+        let group: Vec<(usize, &Compressed)> = indices.iter()
+            .filter(|i| !dyn_used.contains(i))
+            .map(|&i| (i, &entries[i])).collect();
+        if group.is_empty() { continue; }
+        for &(i, _) in &group { dyn_used.insert(i); }
+        let _ = writeln!(out, "--- {} ({}) ---", tag.to_uppercase(), group.len());
+        for (_, e) in group.iter().take(3) { format_entry_n(out, e, 5); }
+        for (_, e) in group.iter().skip(3).take(5) { format_oneliner(out, e); }
+        if group.len() > 8 {
+            let _ = writeln!(out, "  ... +{} more\n", group.len() - 8);
+        }
+    }
+    dyn_used
 }
 
 fn write_untagged(out: &mut String, entries: &[Compressed], used: &FxHashSet<usize>,
@@ -187,8 +280,9 @@ fn format_entry_n(out: &mut String, e: &Compressed, max_lines: usize) {
     let src = e.source.as_deref().map(|s| format!(" → {s}")).unwrap_or_default();
     let also = format_also(&e.also_in);
     let chain_note = e.chain.as_deref().map(|_| " (chained)").unwrap_or("");
-    let _ = writeln!(out, "[{}] {}{}{}{}{}", e.topic, e.date, freshness_tag(e.days_old),
-        src, also, chain_note);
+    let refs = if e.link_in >= 2 { format!(" ({} refs)", e.link_in) } else { String::new() };
+    let _ = writeln!(out, "[{}] {}{}{}{}{}{}", e.topic, e.date, freshness_tag(e.days_old),
+        src, also, chain_note, refs);
     if let Some(ref chain) = e.chain {
         let _ = writeln!(out, "  {}", crate::text::truncate(chain, 120));
     }
@@ -207,8 +301,9 @@ fn format_oneliner(out: &mut String, e: &Compressed) {
     let src = e.source.as_deref().map(|s| format!(" → {s}")).unwrap_or_default();
     let also = format_also(&e.also_in);
     let chain = e.chain.as_deref().map(|c| format!(" ({})", c)).unwrap_or_default();
-    let _ = writeln!(out, "  [{}] {}{}{}{}{}", e.topic, fc, src, also, chain,
-        freshness_tag(e.days_old));
+    let refs = if e.link_in >= 2 { format!(" ({} refs)", e.link_in) } else { String::new() };
+    let _ = writeln!(out, "  [{}] {}{}{}{}{}{}", e.topic, fc, src, also, chain,
+        freshness_tag(e.days_old), refs);
 }
 
 fn format_also(topics: &[String]) -> String {

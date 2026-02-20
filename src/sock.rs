@@ -77,6 +77,7 @@ fn handle_conn(stream: UnixStream, _dir: &Path) {
         }
         "topics" => handle_topics(),
         "ambient" => handle_ambient_fast(line),
+        "hook_ambient" => handle_hook_relay(line),
         _ => String::new(),
     };
 
@@ -117,78 +118,16 @@ fn handle_topics() -> String {
 
 /// Combined ambient hook query with fast string extraction — no full JSON parse needed.
 /// Request: {"op":"ambient","stem":"cache","syms":["removed1","removed2"]}
+/// v6.6: calls unified hook::query_ambient — eliminates 55-line duplicated function.
 fn handle_ambient_fast(line: &str) -> String {
     let stem = match crate::hook::extract_json_str(line, "stem") {
         Some(s) if !s.is_empty() => s,
         _ => return String::new(),
     };
-
-    // Extract syms array manually: find "syms":[ then parse quoted strings
     let syms = extract_syms_array(line);
-
     crate::mcp::with_index(|data| {
-        query_ambient_core(data, stem, &syms)
+        crate::hook::query_ambient(data, stem, &syms)
     }).unwrap_or_default()
-}
-
-/// Shared ambient query logic used by both socket and disk-fallback paths.
-/// Zero format!() calls — all output built with push_str.
-fn query_ambient_core(data: &[u8], stem: &str, syms: &[&str]) -> String {
-    let results = crate::binquery::search(data, stem, 5).unwrap_or_default();
-    let has_results = !results.is_empty() && !results.starts_with("0 match");
-
-    // Stack-allocated query string for structural search
-    let mut sq_buf = [0u8; 128];
-    let sq_prefix = b"structural ";
-    let sq_len = sq_prefix.len() + stem.len();
-    let structural = if sq_len <= sq_buf.len() {
-        sq_buf[..sq_prefix.len()].copy_from_slice(sq_prefix);
-        sq_buf[sq_prefix.len()..sq_len].copy_from_slice(stem.as_bytes());
-        let sq = unsafe { std::str::from_utf8_unchecked(&sq_buf[..sq_len]) };
-        crate::binquery::search(data, sq, 3).unwrap_or_default()
-    } else {
-        let mut sq = String::with_capacity(sq_len);
-        sq.push_str("structural ");
-        sq.push_str(stem);
-        crate::binquery::search(data, &sq, 3).unwrap_or_default()
-    };
-    let has_structural = !structural.is_empty() && !structural.starts_with("0 match");
-
-    let mut refactor = String::new();
-    if !syms.is_empty() {
-        refactor.push_str("\nREFACTOR IMPACT (symbols modified: ");
-        for (i, sym) in syms.iter().enumerate() {
-            if i > 0 { refactor.push_str(", "); }
-            refactor.push_str(sym);
-        }
-        refactor.push_str("):\n");
-        for sym in syms {
-            let hits = crate::binquery::search(data, sym, 3).unwrap_or_default();
-            if !hits.is_empty() && !hits.starts_with("0 match") {
-                refactor.push_str(&hits);
-            }
-        }
-    }
-    let has_refactor = !refactor.is_empty();
-    if !has_results && !has_structural && !has_refactor { return String::new(); }
-
-    let mut out = String::new();
-    if has_results {
-        out.push_str("amaranthine entries for ");
-        out.push_str(stem);
-        out.push_str(":\n");
-        out.push_str(&results);
-    }
-    if has_structural {
-        if has_results { out.push_str("\n---\n"); }
-        out.push_str("structural coupling:\n");
-        out.push_str(&structural);
-    }
-    if has_refactor {
-        if has_results || has_structural { out.push_str("\n---\n"); }
-        out.push_str(&refactor);
-    }
-    out
 }
 
 /// Fast integer-to-string push without format!(). Handles 0-65535 (u16 range).
@@ -227,6 +166,60 @@ fn extract_syms_array(line: &str) -> Vec<&str> {
         .map(|(_, s)| s)
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Handle hook relay from C binary (amr-hook).
+/// Receives full Claude Code hook stdin with spliced op field.
+/// Ambient: {"op":"hook_ambient","tool_name":"Read","tool_input":{"file_path":"..."}}
+/// Subagent: {"op":"hook_ambient","type":"subagent-start"}
+/// Returns complete hook JSON (with hookSpecificOutput wrapper).
+fn handle_hook_relay(line: &str) -> String {
+    let htype = crate::hook::extract_json_str(line, "type").unwrap_or("");
+    if htype == "subagent-start" {
+        let topics = handle_topics();
+        if topics.is_empty() {
+            return crate::hook::hook_output(
+                "AMARANTHINE KNOWLEDGE STORE: You have access to amaranthine MCP tools. \
+                 Search before starting work.");
+        }
+        let mut msg = String::with_capacity(128 + topics.len());
+        msg.push_str(
+            "AMARANTHINE KNOWLEDGE STORE: You have access to amaranthine MCP tools. \
+             BEFORE starting work, call mcp__amaranthine__search with keywords \
+             relevant to your task. Topics: ");
+        msg.push_str(&topics);
+        return crate::hook::hook_output(&msg);
+    }
+
+    // Ambient: extract tool, file, stem — same logic as hook.rs::ambient()
+    let tool = crate::hook::extract_json_str(line, "tool_name").unwrap_or("");
+    let is_edit = tool == "Edit";
+    match tool {
+        "Read" | "Edit" | "Write" | "Glob" | "Grep" | "NotebookEdit" => {}
+        _ => return String::new(),
+    }
+    let path = crate::hook::extract_json_str(line, "file_path")
+        .or_else(|| crate::hook::extract_json_str(line, "\"path\""))
+        .unwrap_or("");
+    if path.is_empty() { return String::new(); }
+    let stem = std::path::Path::new(path)
+        .file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    if stem.len() < 3 { return String::new(); }
+
+    // Edit refactor detection: parse full JSON for old_string/new_string
+    let syms = if is_edit {
+        match crate::json::parse(line) {
+            Ok(val) => crate::hook::extract_removed_syms(&val, stem),
+            Err(_) => vec![],
+        }
+    } else { vec![] };
+    let sym_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+
+    let ctx = crate::mcp::with_index(|data| {
+        crate::hook::query_ambient(data, stem, &sym_refs)
+    }).unwrap_or_default();
+    if ctx.is_empty() { return String::new(); }
+    crate::hook::hook_output(&ctx)
 }
 
 /// Client: query the running MCP server's socket. Returns None if unavailable.

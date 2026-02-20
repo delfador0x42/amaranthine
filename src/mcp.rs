@@ -58,7 +58,8 @@ pub fn run(dir: &Path) -> Result<(), String> {
         let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
         let id = msg.get("id");
 
-        let resp: Option<String> = match method {
+        // All branches write directly to stdout and continue — zero intermediate String.
+        match method {
             "initialize" => {
                 let id_json = id_to_json(id);
                 let mut out = stdout.lock();
@@ -66,22 +67,17 @@ pub fn run(dir: &Path) -> Result<(), String> {
                     r#"{{"jsonrpc":"2.0","id":{id_json},"result":{INIT_RESULT}}}"#);
                 let _ = writeln!(out);
                 let _ = out.flush();
-                continue;
             }
-            "notifications/initialized" | "initialized" => None,
+            "notifications/initialized" | "initialized" => {}
             "tools/list" => {
-                // Fast path: pre-serialized tool list (cached, Arc avoids clone)
                 let id_json = id_to_json(id);
                 let tools_json = tools::tool_list_json();
                 let mut out = stdout.lock();
                 let _ = write!(out, r#"{{"jsonrpc":"2.0","id":{id_json},"result":{tools_json}}}"#);
                 let _ = writeln!(out);
                 let _ = out.flush();
-                continue;
             }
             "tools/call" => {
-                // Hot path: streaming write — no intermediate String allocation.
-                // Extract name/args once (was duplicated for _reload check).
                 let p = msg.get("params");
                 let name = p.and_then(|p| p.get("name")).and_then(|v| v.as_str()).unwrap_or("");
                 let id_json = id_to_json(id);
@@ -105,37 +101,69 @@ pub fn run(dir: &Path) -> Result<(), String> {
                     break;
                 }
                 let _ = out.flush();
-                continue;
             }
             "ping" => {
                 let id_json = id_to_json(id);
-                Some(format!(r#"{{"jsonrpc":"2.0","id":{id_json},"result":{{}}}}"#))
+                let mut out = stdout.lock();
+                let _ = write!(out, r#"{{"jsonrpc":"2.0","id":{id_json},"result":{{}}}}"#);
+                let _ = writeln!(out);
+                let _ = out.flush();
             }
-            _ => id.map(|_| {
+            _ if id.is_some() => {
                 let id_json = id_to_json(id);
-                rpc_err_str(&id_json, -32601, "method not found")
-            }),
-        };
-
-        if let Some(r) = resp {
-            let mut out = stdout.lock();
-            if let Err(e) = writeln!(out, "{r}") {
-                eprintln!("amaranthine: stdout write error: {e}");
-                break;
+                let mut out = stdout.lock();
+                let _ = write!(out, r#"{{"jsonrpc":"2.0","id":{id_json},"error":{{"code":-32601,"message":"method not found"}}}}"#);
+                let _ = writeln!(out);
+                let _ = out.flush();
             }
-            let _ = out.flush();
+            _ => {}
         }
     }
     Ok(())
 }
 
-/// Convert id Value to JSON string representation. Avoids Value::to_string() allocation
-/// for common cases (integer and null).
-fn id_to_json(id: Option<&Value>) -> String {
+/// Write id Value to stack buffer — zero heap allocation for the 99% case (integer IDs).
+/// Returns a small stack string that derefs to &str.
+fn id_to_json(id: Option<&Value>) -> IdBuf {
     match id {
-        Some(Value::Num(n)) if n.fract() == 0.0 => format!("{}", *n as i64),
-        Some(v) => v.to_string(),
-        None => "null".into(),
+        Some(Value::Num(n)) if n.fract() == 0.0 => {
+            let mut buf = IdBuf { bytes: [0u8; 24], len: 0 };
+            let v = *n as i64;
+            if v == 0 { buf.bytes[0] = b'0'; buf.len = 1; return buf; }
+            let (neg, mut uv) = if v < 0 { (true, (-(v as i128)) as u64) } else { (false, v as u64) };
+            let mut i = 24;
+            while uv > 0 { i -= 1; buf.bytes[i] = b'0' + (uv % 10) as u8; uv /= 10; }
+            if neg { i -= 1; buf.bytes[i] = b'-'; }
+            buf.bytes.copy_within(i..24, 0);
+            buf.len = (24 - i) as u8;
+            buf
+        }
+        Some(v) => {
+            let s = v.to_string();
+            let mut buf = IdBuf { bytes: [0u8; 24], len: s.len().min(24) as u8 };
+            buf.bytes[..buf.len as usize].copy_from_slice(&s.as_bytes()[..buf.len as usize]);
+            buf
+        }
+        None => {
+            let mut buf = IdBuf { bytes: [0u8; 24], len: 4 };
+            buf.bytes[..4].copy_from_slice(b"null");
+            buf
+        }
+    }
+}
+
+/// Stack-allocated ID buffer — avoids heap allocation for JSON-RPC id formatting.
+/// MCP IDs are almost always small integers (1-999), fitting easily in 24 bytes.
+struct IdBuf { bytes: [u8; 24], len: u8 }
+impl std::ops::Deref for IdBuf {
+    type Target = str;
+    fn deref(&self) -> &str {
+        unsafe { std::str::from_utf8_unchecked(&self.bytes[..self.len as usize]) }
+    }
+}
+impl std::fmt::Display for IdBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(self)
     }
 }
 
@@ -186,19 +214,6 @@ fn write_json_escaped(w: &mut impl io::Write, s: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Build a JSON-RPC error response as String — used for non-tools/call errors.
-fn rpc_err_str(id_json: &str, code: i64, msg: &str) -> String {
-    let mut out = String::with_capacity(128 + msg.len());
-    out.push_str(r#"{"jsonrpc":"2.0","id":"#);
-    out.push_str(id_json);
-    out.push_str(r#","error":{"code":"#);
-    use std::fmt::Write as _;
-    let _ = write!(out, "{code}");
-    out.push_str(r#","message":""#);
-    crate::json::escape_into(msg, &mut out);
-    out.push_str(r#""}}"#);
-    out
-}
 
 fn do_reload() {
     use std::os::unix::process::CommandExt;
@@ -284,22 +299,25 @@ pub(crate) fn after_write(_dir: &Path, _topic: &str) {
 /// Rebuild index if dirty and debounce window (50ms) has elapsed.
 /// Burst writes within the window are coalesced into a single rebuild.
 /// Persists index.bin to disk (atomic rename) so hook mmap always reads fresh data.
+/// v6.6: single DIRTY_AT lock acquisition (was two: check + clear).
 pub(crate) fn ensure_index_fresh(dir: &Path) {
     if !INDEX_DIRTY.load(Ordering::Acquire) { return; }
-    // Debounce: skip rebuild if dirty flag was set less than 50ms ago
-    let elapsed = DIRTY_AT.lock().ok()
-        .and_then(|g| g.map(|t| t.elapsed()));
-    if let Some(dt) = elapsed {
-        if dt < std::time::Duration::from_millis(50) {
-            return; // too soon — let writes accumulate
+    // Single lock: check debounce AND clear in one acquisition
+    let should_rebuild = DIRTY_AT.lock().ok().map_or(false, |mut g| {
+        match *g {
+            Some(t) if t.elapsed() < std::time::Duration::from_millis(50) => false,
+            _ => {
+                // Only clear if we win the CAS
+                if INDEX_DIRTY.compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                    *g = None;
+                    true
+                } else { false }
+            }
         }
-    }
-    if INDEX_DIRTY.compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-        if let Ok(mut guard) = DIRTY_AT.lock() { *guard = None; }
+    });
+    if should_rebuild {
         match crate::inverted::rebuild(dir) {
             Ok((_, bytes)) => {
-                // Persist to disk so hook mmap reads fresh data.
-                // Atomic: write tmp, rename over target.
                 let tmp = dir.join("index.bin.tmp");
                 let target = dir.join("index.bin");
                 let _ = std::fs::write(&tmp, &bytes)
@@ -312,4 +330,4 @@ pub(crate) fn ensure_index_fresh(dir: &Path) {
 }
 
 /// Pre-serialized initialize result — zero allocation, written directly to stdout.
-const INIT_RESULT: &str = r#"{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"amaranthine","version":"6.5.0"}}"#;
+const INIT_RESULT: &str = r#"{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"amaranthine","version":"7.0.0"}}"#;

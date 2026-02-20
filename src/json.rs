@@ -136,14 +136,79 @@ pub fn escape_into(s: &str, buf: &mut String) {
 }
 
 impl fmt::Display for Value {
+    /// v6.6: write directly to formatter — eliminates intermediate String allocation.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut buf = String::new();
-        write_compact(self, &mut buf);
-        f.write_str(&buf)
+        write_to_fmt(self, f)
     }
 }
 
-fn write_compact(v: &Value, buf: &mut String) {
+/// Write Value as compact JSON directly to fmt::Formatter (zero intermediate alloc).
+fn write_to_fmt(v: &Value, f: &mut fmt::Formatter) -> fmt::Result {
+    use fmt::Write;
+    match v {
+        Value::Null => f.write_str("null"),
+        Value::Bool(b) => f.write_str(if *b { "true" } else { "false" }),
+        Value::Num(n) => {
+            if n.fract() == 0.0 && n.is_finite() { write!(f, "{}", *n as i64) }
+            else { write!(f, "{n}") }
+        }
+        Value::Str(s) => {
+            f.write_char('"')?;
+            escape_to_fmt(s, f)?;
+            f.write_char('"')
+        }
+        Value::Arr(items) => {
+            f.write_char('[')?;
+            for (i, v) in items.iter().enumerate() {
+                if i > 0 { f.write_char(',')?; }
+                write_to_fmt(v, f)?;
+            }
+            f.write_char(']')
+        }
+        Value::Obj(pairs) => {
+            f.write_char('{')?;
+            for (i, (k, v)) in pairs.iter().enumerate() {
+                if i > 0 { f.write_char(',')?; }
+                f.write_char('"')?;
+                escape_to_fmt(k, f)?;
+                f.write_str("\":")?;
+                write_to_fmt(v, f)?;
+            }
+            f.write_char('}')
+        }
+    }
+}
+
+/// Escape string for JSON directly to fmt::Formatter — same chunk-copy as escape_into.
+fn escape_to_fmt(s: &str, f: &mut fmt::Formatter) -> fmt::Result {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut last_copy = 0;
+    while i < bytes.len() {
+        let esc = match bytes[i] {
+            b'"' => "\\\"",
+            b'\\' => "\\\\",
+            b'\n' => "\\n",
+            b'\r' => "\\r",
+            b'\t' => "\\t",
+            c if c < 0x20 => {
+                if last_copy < i { f.write_str(&s[last_copy..i])?; }
+                write!(f, "\\u{:04x}", c)?;
+                i += 1; last_copy = i;
+                continue;
+            }
+            _ => { i += 1; continue; }
+        };
+        if last_copy < i { f.write_str(&s[last_copy..i])?; }
+        f.write_str(esc)?;
+        i += 1; last_copy = i;
+    }
+    if last_copy < bytes.len() { f.write_str(&s[last_copy..])?; }
+    Ok(())
+}
+
+/// Write Value as compact JSON to a String. Public for direct String building.
+pub fn write_compact(v: &Value, buf: &mut String) {
     match v {
         Value::Null => buf.push_str("null"),
         Value::Bool(b) => buf.push_str(if *b { "true" } else { "false" }),

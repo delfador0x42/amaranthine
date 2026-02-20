@@ -70,17 +70,35 @@ pub fn reset_query_state(num_entries: usize) {
 
 // --- Formatted search (MCP path) ---
 
+/// v6.6: zero format!() — all output built with push_str + itoa.
 pub fn search(data: &[u8], query: &str, limit: usize) -> Result<String, String> {
     let hits = search_v2(data, query, limit)?;
-    if hits.is_empty() { return Ok(format!("0 matches for '{query}'")); }
+    if hits.is_empty() {
+        let mut out = String::with_capacity(20 + query.len());
+        out.push_str("0 matches for '");
+        out.push_str(query);
+        out.push('\'');
+        return Ok(out);
+    }
     let mut out = String::new();
     for h in &hits {
         out.push_str("  ");
         out.push_str(&h.snippet);
         out.push('\n');
     }
-    out.push_str(&format!("{} match(es) [index]\n", hits.len()));
+    itoa_push(&mut out, hits.len() as u32);
+    out.push_str(" match(es) [index]\n");
     Ok(out)
+}
+
+/// Fast integer-to-string push without format!(). Handles full u32 range.
+fn itoa_push(buf: &mut String, n: u32) {
+    if n == 0 { buf.push('0'); return; }
+    let mut digits = [0u8; 10];
+    let mut i = 0;
+    let mut v = n;
+    while v > 0 { digits[i] = b'0' + (v % 10) as u8; v /= 10; i += 1; }
+    while i > 0 { i -= 1; buf.push(digits[i] as char); }
 }
 
 // --- Structured search ---

@@ -31,7 +31,7 @@ This re-execs the server process with the new binary (no restart needed).
 
 ## Project Structure
 
-39 Rust files, ~6500 lines. One file, one job.
+41 Rust files, ~7700 lines. One file, one job.
 
 ### Core Data Layer
 

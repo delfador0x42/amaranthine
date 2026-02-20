@@ -52,7 +52,8 @@ fn mmap_index(dir: &Path) -> Option<&'static [u8]> {
 
 /// Build hook JSON output with direct string formatting — zero Value allocations.
 /// JSON-escapes the context string inline via json::escape_into.
-fn hook_output(context: &str) -> String {
+/// Public for use by sock.rs hook relay handler.
+pub fn hook_output(context: &str) -> String {
     let mut out = String::with_capacity(64 + context.len());
     out.push_str(r#"{"hookSpecificOutput":{"additionalContext":""#);
     crate::json::escape_into(context, &mut out);
@@ -99,7 +100,8 @@ fn ambient(input: &str, dir: &Path) -> Result<String, String> {
         Some(d) => d,
         None => return Ok(String::new()),
     };
-    let out = query_ambient(data, stem, &syms);
+    let sym_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+    let out = query_ambient(data, stem, &sym_refs);
     if out.is_empty() { return Ok(String::new()); }
     Ok(hook_output(&out))
 }
@@ -207,20 +209,22 @@ fn subagent_start(dir: &Path) -> Result<String, String> {
 }
 
 /// Extract symbols removed by an Edit (for refactor impact detection).
-fn extract_removed_syms(input: &crate::json::Value, stem: &str) -> Vec<String> {
+/// Public for use by sock.rs hook relay handler.
+/// v6.6: FxHashSet (~3ns/op) replaces std::HashSet (SipHash ~20ns/op).
+pub fn extract_removed_syms(input: &crate::json::Value, stem: &str) -> Vec<String> {
     let ti = input.get("tool_input");
     let old = ti.and_then(|t| t.get("old_string")).and_then(|v| v.as_str()).unwrap_or("");
     let new_str = ti.and_then(|t| t.get("new_string")).and_then(|v| v.as_str()).unwrap_or("");
     if old.len() < 8 { return vec![]; }
-    let extract = |s: &str| -> std::collections::HashSet<String> {
+    let extract = |s: &str| -> crate::fxhash::FxHashSet<String> {
         s.split(|c: char| !c.is_alphanumeric() && c != '_')
             .filter(|w| w.len() >= 4 && w.bytes().any(|b| b.is_ascii_alphabetic()))
             .map(|w| w.to_lowercase())
             .collect()
     };
-    let old_tokens: std::collections::HashSet<String> = extract(old)
+    let old_tokens: crate::fxhash::FxHashSet<String> = extract(old)
         .into_iter().filter(|t| t != stem).collect();
-    let new_tokens: std::collections::HashSet<String> = extract(new_str);
+    let new_tokens: crate::fxhash::FxHashSet<String> = extract(new_str);
     let mut removed: Vec<String> = old_tokens.into_iter()
         .filter(|t| !new_tokens.contains(t))
         .collect();
@@ -231,12 +235,13 @@ fn extract_removed_syms(input: &crate::json::Value, stem: &str) -> Vec<String> {
 
 /// Run ambient queries against index data (mmap or disk).
 /// Zero format!() calls — all output built with push_str.
+/// v6.6: unified implementation used by both hook.rs and sock.rs — takes &[&str] for syms.
 /// v6.5: stack-allocated structural query — zero heap alloc for query string.
-fn query_ambient(data: &[u8], stem: &str, syms: &[String]) -> String {
+pub fn query_ambient(data: &[u8], stem: &str, syms: &[&str]) -> String {
     let results = crate::binquery::search(data, stem, 5).unwrap_or_default();
     let has_results = !results.is_empty() && !results.starts_with("0 match");
 
-    // Stack-allocated query string for structural search (matches sock.rs optimization)
+    // Stack-allocated query string for structural search
     let mut sq_buf = [0u8; 128];
     let sq_prefix = b"structural ";
     let sq_len = sq_prefix.len() + stem.len();

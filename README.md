@@ -4,6 +4,8 @@ Persistent memory for AI coding agents. Your agent forgets everything between se
 
 Single-file append-only data store, binary inverted index, BM25 search, 37 MCP tools, zero dependencies.
 
+> **Platform:** macOS (Apple Silicon and Intel). Linux support is straightforward but untested — codesign steps are skipped automatically on non-macOS.
+
 ## Install
 
 **Requirements:** [Rust toolchain](https://rustup.rs/) (`cargo`) and [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
@@ -14,7 +16,7 @@ cd amaranthine
 make install
 ```
 
-`make install` does everything:
+That's it. `make install` handles everything:
 1. Builds the release binary (~15s)
 2. Copies it to `~/.local/bin/amaranthine` and codesigns it (macOS)
 3. Creates `~/.amaranthine/` for knowledge storage
@@ -22,26 +24,45 @@ make install
 5. Adds agent instructions to `~/.claude/CLAUDE.md`
 6. Installs 4 hooks in `~/.claude/settings.json`
 
-**Restart Claude Code.** Your agent now has persistent memory.
+**Restart Claude Code** (or start a new session). Your agent now has persistent memory.
 
 > **Note:** The MCP server uses the full binary path, so `~/.local/bin` doesn't need to
 > be on your PATH. Add it if you want CLI access: `export PATH="$HOME/.local/bin:$PATH"`
 
 ### Verify it works
 
-Open Claude Code and ask your agent to store something:
+Quick CLI check (no Claude Code needed):
 
-```
-Store in amaranthine: "test entry" under topic "test"
-```
-
-Then in a new session:
-
-```
-Search amaranthine for "test"
+```bash
+~/.local/bin/amaranthine store test "install verification" --tags test
+~/.local/bin/amaranthine search "install verification"
+~/.local/bin/amaranthine call delete topic="test" all="true"
 ```
 
-If it finds your entry, you're set. Delete the test topic when done.
+You should see your entry in the search results. If you do, everything is wired up.
+
+Then open Claude Code and try it end-to-end — ask your agent to search amaranthine for something. The agent should use the `search` MCP tool automatically.
+
+### Troubleshooting
+
+**`cargo: command not found`** — Install the Rust toolchain: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+
+**MCP server not showing up in Claude Code** — Check `~/.claude.json` has an `amaranthine` entry under `mcpServers`. If not, re-run `make install`. Make sure you restarted Claude Code after install.
+
+**`codesign` errors** — Only affects macOS. The binary needs ad-hoc signing so macOS doesn't kill it. Run: `codesign -s - -f ~/.local/bin/amaranthine`
+
+**Hooks not firing** — Check `~/.claude/settings.json` has entries under `hooks.PreToolUse`, `hooks.PostToolUse`, `hooks.Stop`, and `hooks.SubagentStart`. If missing, re-run `make install`.
+
+**Permission denied** — Make sure `~/.local/bin/amaranthine` is executable: `chmod +x ~/.local/bin/amaranthine`
+
+### Uninstall
+
+```bash
+rm ~/.local/bin/amaranthine                          # binary
+rm -rf ~/.amaranthine/                               # knowledge data (⚠️ deletes all stored knowledge)
+```
+
+Then remove the `amaranthine` entry from `~/.claude.json` (under `mcpServers`) and the hook entries from `~/.claude/settings.json`. The installer appends a section to `~/.claude/CLAUDE.md` — remove the `## Memory — amaranthine` section if present.
 
 ## What happens
 
@@ -107,8 +128,8 @@ Search uses BM25 with CamelCase/snake_case splitting, topic-name boost, tag-awar
 ## Architecture
 
 - Zero runtime dependencies — hand-rolled JSON parser, hasher, binary index, date math
-- 39 Rust files, ~6500 lines, ~1.1MB release binary
+- 41 Rust files, ~7700 lines, ~1.1MB release binary
 - Three access tiers: C FFI (~200ns), MCP server (~5ms), corpus cache (~0us warm)
 - See [DESIGN.md](DESIGN.md) for architecture details
 - See [CONTRIBUTING.md](CONTRIBUTING.md) for development guide
-- See [prompts/knowledge-seed.md](prompts/knowledge-seed.md) for the deep knowledge seeding prompt
+- See [prompts/deep-refactor.md](prompts/deep-refactor.md) for the deep knowledge seeding prompt

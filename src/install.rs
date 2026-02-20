@@ -132,7 +132,7 @@ fn update_hooks(path: &Path, exe: &str) -> Result<(), String> {
     }
 
     let hooks = Value::Obj(vec![
-        ("PreToolUse".into(), hook_entry(exe, "ambient", "")),
+        ("PreToolUse".into(), hook_entry(exe, "ambient", "Read|Edit|Write")),
         ("PostToolUse".into(), hook_entry(exe, "post-build", "Bash")),
         ("Stop".into(), hook_entry(exe, "stop", "")),
         ("SubagentStart".into(), hook_entry(exe, "subagent-start", "")),
