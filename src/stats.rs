@@ -23,6 +23,52 @@ pub fn list_tags(dir: &Path) -> Result<String, String> {
     })
 }
 
+/// Index-backed stats: reads header + entry metadata from in-memory index.
+/// Falls back to corpus scan if no index available.
+pub fn stats_fast(dir: &Path) -> Result<String, String> {
+    let result = crate::mcp::with_index(|data| stats_from_index(data))
+        .flatten()
+        .or_else(|| {
+            std::fs::read(dir.join("index.bin")).ok()
+                .and_then(|data| stats_from_index(&data))
+        });
+    match result {
+        Some(s) => Ok(s),
+        None => stats(dir),
+    }
+}
+
+fn stats_from_index(data: &[u8]) -> Option<String> {
+    use crate::format::*;
+    let hdr = crate::binquery::read_header(data).ok()?;
+    let n = { hdr.num_entries } as usize;
+    let meta_off = { hdr.meta_off } as usize;
+    let mut oldest: Option<u16> = None;
+    let mut newest: Option<u16> = None;
+    let mut tagged = 0u32;
+    for i in 0..n {
+        let off = meta_off + i * std::mem::size_of::<EntryMeta>();
+        let m = crate::binquery::read_at::<EntryMeta>(data, off).ok()?;
+        let ed = { m.epoch_days };
+        if ed > 0 {
+            oldest = Some(oldest.map_or(ed, |o: u16| o.min(ed)));
+            newest = Some(newest.map_or(ed, |n: u16| n.max(ed)));
+        }
+        if { m.tag_bitmap } != 0 { tagged += 1; }
+    }
+    let now_days = crate::time::LocalTime::now().to_days();
+    let mut out = String::new();
+    let _ = writeln!(out, "topics:         {}", { hdr.num_topics });
+    let _ = writeln!(out, "entries:        {n}");
+    let _ = writeln!(out, "tagged entries: {tagged}");
+    let _ = writeln!(out, "unique tags:    {}", { hdr.num_tags });
+    if let (Some(o), Some(n)) = (oldest, newest) {
+        let _ = writeln!(out, "oldest entry:   {} days ago", now_days - o as i64);
+        let _ = writeln!(out, "newest entry:   {} days ago", now_days - n as i64);
+    }
+    Some(out)
+}
+
 pub fn stats(dir: &Path) -> Result<String, String> {
     crate::cache::with_corpus(dir, |cached| {
         let mut topics: crate::fxhash::FxHashSet<&str> = crate::fxhash::FxHashSet::default();

@@ -1,4 +1,19 @@
 use crate::json::Value;
+use std::sync::{Arc, Mutex};
+
+static TOOL_CACHE: Mutex<Option<Arc<str>>> = Mutex::new(None);
+
+/// Return pre-serialized JSON for the tools/list result object.
+/// Cached after first call — Arc avoids cloning the ~15KB JSON string.
+pub fn tool_list_json() -> Arc<str> {
+    if let Ok(guard) = TOOL_CACHE.lock() {
+        if let Some(cached) = &*guard { return Arc::clone(cached); }
+    }
+    let result = Value::Obj(vec![("tools".into(), tool_list())]);
+    let json: Arc<str> = result.to_string().into();
+    if let Ok(mut guard) = TOOL_CACHE.lock() { *guard = Some(Arc::clone(&json)); }
+    json
+}
 
 pub fn tool(name: &str, desc: &str, req: &[&str], props: &[(&str, &str, &str)]) -> Value {
     Value::Obj(vec![

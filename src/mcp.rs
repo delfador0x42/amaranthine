@@ -27,21 +27,31 @@ pub fn run(dir: &Path) -> Result<(), String> {
 
     ensure_datalog(dir);
 
+    // Start Unix socket listener for hook queries against in-memory index
+    let _sock_guard = crate::sock::start_listener(dir);
+
     if std::env::var("AMARANTHINE_REEXEC").is_ok() {
         std::env::remove_var("AMARANTHINE_REEXEC");
-        let notif = Value::Obj(vec![
-            ("jsonrpc".into(), Value::Str("2.0".into())),
-            ("method".into(), Value::Str("notifications/tools/list_changed".into())),
-        ]);
         let mut out = stdout.lock();
-        let _ = writeln!(out, "{notif}");
+        let _ = writeln!(out, r#"{{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}}"#);
         let _ = out.flush();
     }
 
-    for line in stdin.lock().lines() {
-        let line = line.map_err(|e| e.to_string())?;
+    // Reusable line buffer — avoids allocation per message
+    let mut line_buf = String::with_capacity(4096);
+    let stdin_lock = stdin.lock();
+    let mut reader = io::BufReader::new(stdin_lock);
+
+    loop {
+        line_buf.clear();
+        match reader.read_line(&mut line_buf) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(e) => { return Err(e.to_string()); }
+        }
+        let line = line_buf.trim();
         if line.is_empty() || line.len() > 10_000_000 { continue; }
-        let msg = match crate::json::parse(&line) {
+        let msg = match crate::json::parse(line) {
             Ok(v) => v,
             Err(_) => continue,
         };
@@ -52,9 +62,10 @@ pub fn run(dir: &Path) -> Result<(), String> {
             let p = msg.get("params");
             let name = p.and_then(|p| p.get("name")).and_then(|v| v.as_str()).unwrap_or("");
             if name == "_reload" {
-                let resp = rpc_ok(id, content_result("reloading amaranthine..."));
+                let id_json = id_to_json(id);
                 let mut out = stdout.lock();
-                let _ = writeln!(out, "{resp}");
+                let _ = writeln!(out,
+                    r#"{{"jsonrpc":"2.0","id":{id_json},"result":{{"content":[{{"type":"text","text":"reloading amaranthine..."}}]}}}}"#);
                 let _ = out.flush();
                 drop(out);
                 do_reload();
@@ -62,23 +73,37 @@ pub fn run(dir: &Path) -> Result<(), String> {
             }
         }
 
-        let resp = match method {
-            "initialize" => Some(rpc_ok(id, init_result())),
+        let resp: Option<String> = match method {
+            "initialize" => Some(rpc_ok_value(id, init_result())),
             "notifications/initialized" | "initialized" => None,
-            "tools/list" => Some(rpc_ok(id, Value::Obj(vec![
-                ("tools".into(), tools::tool_list()),
-            ]))),
+            "tools/list" => {
+                // Fast path: pre-serialized tool list (cached, Arc avoids clone)
+                let id_json = id_to_json(id);
+                let tools_json = tools::tool_list_json();
+                let mut out = stdout.lock();
+                let _ = write!(out, r#"{{"jsonrpc":"2.0","id":{id_json},"result":{tools_json}}}"#);
+                let _ = writeln!(out);
+                let _ = out.flush();
+                continue;
+            }
             "tools/call" => {
                 let p = msg.get("params");
                 let name = p.and_then(|p| p.get("name")).and_then(|v| v.as_str()).unwrap_or("");
                 let args = p.and_then(|p| p.get("arguments"));
+                let id_json = id_to_json(id);
                 Some(match dispatch::dispatch(name, args, dir) {
-                    Ok(text) => rpc_ok(id, content_result(&text)),
-                    Err(e) => rpc_err(id, -32603, &e),
+                    Ok(text) => rpc_ok_content(&id_json, &text),
+                    Err(e) => rpc_err_str(&id_json, -32603, &e),
                 })
             }
-            "ping" => Some(rpc_ok(id, Value::Obj(Vec::new()))),
-            _ => id.map(|_| rpc_err(id, -32601, "method not found")),
+            "ping" => {
+                let id_json = id_to_json(id);
+                Some(format!(r#"{{"jsonrpc":"2.0","id":{id_json},"result":{{}}}}"#))
+            }
+            _ => id.map(|_| {
+                let id_json = id_to_json(id);
+                rpc_err_str(&id_json, -32601, "method not found")
+            }),
         };
 
         if let Some(r) = resp {
@@ -91,6 +116,42 @@ pub fn run(dir: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Convert id Value to JSON string representation. Avoids Value::to_string() allocation
+/// for common cases (integer and null).
+fn id_to_json(id: Option<&Value>) -> String {
+    match id {
+        Some(Value::Num(n)) if n.fract() == 0.0 => format!("{}", *n as i64),
+        Some(v) => v.to_string(),
+        None => "null".into(),
+    }
+}
+
+/// Build a JSON-RPC success response with text content — zero Value allocations.
+/// This is the hot path for every tools/call response.
+fn rpc_ok_content(id_json: &str, text: &str) -> String {
+    let mut out = String::with_capacity(128 + text.len());
+    out.push_str(r#"{"jsonrpc":"2.0","id":"#);
+    out.push_str(id_json);
+    out.push_str(r#","result":{"content":[{"type":"text","text":""#);
+    crate::hook::json_escape_into(text.as_bytes(), &mut out);
+    out.push_str(r#""}]}}"#);
+    out
+}
+
+/// Build a JSON-RPC error response — zero Value allocations.
+fn rpc_err_str(id_json: &str, code: i64, msg: &str) -> String {
+    let mut out = String::with_capacity(128 + msg.len());
+    out.push_str(r#"{"jsonrpc":"2.0","id":"#);
+    out.push_str(id_json);
+    out.push_str(r#","error":{"code":"#);
+    use std::fmt::Write;
+    let _ = write!(out, "{code}");
+    out.push_str(r#","message":""#);
+    crate::hook::json_escape_into(msg.as_bytes(), &mut out);
+    out.push_str(r#""}}"#);
+    out
 }
 
 fn do_reload() {
@@ -196,6 +257,7 @@ pub(crate) fn ensure_index_fresh(dir: &Path) {
     }
 }
 
+/// Initialize result — only called once per session, Value tree is fine here.
 fn init_result() -> Value {
     Value::Obj(vec![
         ("protocolVersion".into(), Value::Str("2024-11-05".into())),
@@ -204,35 +266,14 @@ fn init_result() -> Value {
         ])),
         ("serverInfo".into(), Value::Obj(vec![
             ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("6.2.1".into())),
+            ("version".into(), Value::Str("6.3.0".into())),
         ])),
     ])
 }
 
-fn rpc_ok(id: Option<&Value>, result: Value) -> Value {
-    Value::Obj(vec![
-        ("jsonrpc".into(), Value::Str("2.0".into())),
-        ("id".into(), id.cloned().unwrap_or(Value::Null)),
-        ("result".into(), result),
-    ])
-}
-
-fn rpc_err(id: Option<&Value>, code: i64, msg: &str) -> Value {
-    Value::Obj(vec![
-        ("jsonrpc".into(), Value::Str("2.0".into())),
-        ("id".into(), id.cloned().unwrap_or(Value::Null)),
-        ("error".into(), Value::Obj(vec![
-            ("code".into(), Value::Num(code as f64)),
-            ("message".into(), Value::Str(msg.into())),
-        ])),
-    ])
-}
-
-fn content_result(text: &str) -> Value {
-    Value::Obj(vec![("content".into(), Value::Arr(vec![
-        Value::Obj(vec![
-            ("type".into(), Value::Str("text".into())),
-            ("text".into(), Value::Str(text.into())),
-        ]),
-    ]))])
+/// Build JSON-RPC OK response wrapping a Value (only for initialize).
+fn rpc_ok_value(id: Option<&Value>, result: Value) -> String {
+    let id_json = id_to_json(id);
+    let result_json = result.to_string();
+    format!(r#"{{"jsonrpc":"2.0","id":{id_json},"result":{result_json}}}"#)
 }

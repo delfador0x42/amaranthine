@@ -33,6 +33,7 @@ pub mod prune;
 pub mod reconstruct;
 pub mod score;
 pub mod search;
+pub mod sock;
 pub mod stats;
 pub mod store;
 pub mod text;

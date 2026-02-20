@@ -2,8 +2,14 @@ use crate::json::Value;
 use std::path::Path;
 
 pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, String> {
-    // Deferred index rebuild: if a prior write marked dirty, rebuild now
-    super::ensure_index_fresh(dir);
+    // Deferred index rebuild: only for read operations.
+    // Write ops (store, append, batch_store, delete, etc.) will dirty the index anyway.
+    match name {
+        "store" | "append" | "batch_store" | "delete" | "append_entry"
+        | "update_entry" | "rename_topic" | "merge_topics" | "tag_entry"
+        | "import" | "compact_log" | "rebuild_index" | "session" => {}
+        _ => super::ensure_index_fresh(dir),
+    }
     match name {
         "store" => {
             let topic = arg_str(args, "topic");
@@ -152,7 +158,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
                 crate::context::run(dir, q, true)
             }
         }
-        "topics" => crate::topics::list(dir),
+        "topics" => crate::topics::list_compact(dir),
         "recent" => {
             let h = arg_str(args, "hours");
             if let Ok(hours) = h.parse::<u64>() {
@@ -223,7 +229,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
         }
         "digest" => crate::digest::run(dir),
         "list_tags" => crate::stats::list_tags(dir),
-        "stats" => crate::stats::stats(dir),
+        "stats" => crate::stats::stats_fast(dir),
         "list_entries" => {
             let topic = arg_str(args, "topic");
             let m = arg_str(args, "match_str");
