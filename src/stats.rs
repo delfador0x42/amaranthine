@@ -6,8 +6,8 @@ pub fn list_tags(dir: &Path) -> Result<String, String> {
     crate::cache::with_corpus(dir, |cached| {
         let mut tags: BTreeMap<String, usize> = BTreeMap::new();
         for e in cached {
-            for t in e.tags() {
-                *tags.entry(t.to_string()).or_insert(0) += 1;
+            for t in &e.tags {
+                *tags.entry(t.clone()).or_insert(0) += 1;
             }
         }
         let mut out = String::new();
@@ -36,10 +36,9 @@ pub fn stats(dir: &Path) -> Result<String, String> {
                 oldest = Some(oldest.map_or(e.timestamp_min, |o: i32| o.min(e.timestamp_min)));
                 newest = Some(newest.map_or(e.timestamp_min, |n: i32| n.max(e.timestamp_min)));
             }
-            let entry_tags = e.tags();
-            if !entry_tags.is_empty() {
+            if !e.tags.is_empty() {
                 tagged += 1;
-                for t in entry_tags { tags.insert(t.to_string()); }
+                for t in &e.tags { tags.insert(t.clone()); }
             }
         }
         let now_days = crate::time::LocalTime::now().to_days();
@@ -157,7 +156,7 @@ pub fn list_entries(dir: &Path, topic: &str, match_str: Option<&str>) -> Result<
         shown += 1;
         let date = crate::time::minutes_to_date_str(e.timestamp_min);
         let preview = e.body.lines()
-            .find(|l| !l.trim().is_empty() && !l.starts_with("[tags:"))
+            .find(|l| !l.trim().is_empty() && !crate::text::is_metadata_line(l))
             .map(|l| {
                 let t = l.trim().trim_start_matches("- ");
                 if t.len() > 70 { &t[..70] } else { t }

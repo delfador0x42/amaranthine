@@ -4,14 +4,13 @@
 
 use crate::fxhash::{FxHashSet, FxHashMap};
 use std::path::Path;
-use std::rc::Rc;
 pub const BM25_K1: f64 = 1.2;
 pub const BM25_B: f64 = 0.75;
 
 /// A scored search result.
 pub struct ScoredResult {
     pub name: String,
-    pub lines: Rc<Vec<String>>,
+    pub lines: Vec<String>,
     pub score: f64,
 }
 
@@ -69,8 +68,10 @@ fn score_cached_mode(entries: &[&crate::cache::CachedEntry], terms: &[String],
             if score == 0.0 { return None; }
             debug_assert!(e.topic.chars().all(|c| !c.is_uppercase()));
             if terms.iter().any(|t| e.topic.contains(t.as_str())) { score *= 1.5; }
-            if let Some(ref tag_line) = e.tags_raw {
-                let tag_hits = terms.iter().filter(|t| tag_line.contains(t.as_str())).count();
+            if !e.tags.is_empty() {
+                let tag_hits = terms.iter()
+                    .filter(|t| e.tags.iter().any(|tag| tag.contains(t.as_str())))
+                    .count();
                 if tag_hits > 0 { score *= 1.0 + 0.3 * tag_hits as f64; }
             }
             Some((score, idx))
@@ -83,7 +84,7 @@ fn score_cached_mode(entries: &[&crate::cache::CachedEntry], terms: &[String],
         let e = entries[idx];
         let mut lines = vec![format!("## {}", e.date_str())];
         for line in e.body.lines() { lines.push(line.to_string()); }
-        ScoredResult { name: e.topic.to_string(), lines: Rc::new(lines), score }
+        ScoredResult { name: e.topic.to_string(), lines, score }
     }).collect()
 }
 
@@ -300,7 +301,7 @@ fn hydrate_index_hits(dir: &Path, index_data: &[u8], terms: &[String],
             let date = crate::time::minutes_to_date_str(entry.timestamp_min);
             let mut lines = vec![format!("## {date}")];
             for line in entry.body.lines() { lines.push(line.to_string()); }
-            results.push(ScoredResult { name: topic_name, lines: Rc::new(lines), score });
+            results.push(ScoredResult { name: topic_name, lines, score });
         } else {
             // Light hydration: build lines from index data only (zero data.log I/O)
             let tag_line = crate::binquery::reconstruct_tags(index_data, hit.entry_id).ok().flatten();
@@ -316,7 +317,7 @@ fn hydrate_index_hits(dir: &Path, index_data: &[u8], terms: &[String],
             let prefix = format!("[{}] {} ", topic_name, date);
             let content = hit.snippet.strip_prefix(&prefix).unwrap_or(&hit.snippet);
             if !content.is_empty() { lines.push(content.to_string()); }
-            results.push(ScoredResult { name: topic_name, lines: Rc::new(lines), score });
+            results.push(ScoredResult { name: topic_name, lines, score });
         }
     }
     results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
@@ -328,8 +329,8 @@ pub fn collect_all_tags(dir: &Path) -> Vec<(String, usize)> {
     crate::cache::with_corpus(dir, |cached| {
         let mut tags: FxHashMap<String, usize> = FxHashMap::default();
         for e in cached {
-            for t in e.tags() {
-                *tags.entry(t.to_string()).or_insert(0) += 1;
+            for t in &e.tags {
+                *tags.entry(t.clone()).or_insert(0) += 1;
             }
         }
         let mut sorted: Vec<(String, usize)> = tags.into_iter().collect();

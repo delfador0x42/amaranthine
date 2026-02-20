@@ -47,10 +47,7 @@ pub fn compress(entries: Vec<RawEntry>) -> Vec<Compressed> {
 pub fn first_content(body: &str) -> &str {
     body.lines().find(|l| {
         let t = l.trim();
-        !t.is_empty() && !t.starts_with("[tags:") && !t.starts_with("[source:")
-            && !t.starts_with("[type:") && !t.starts_with("[modified:")
-            && !t.starts_with("[tier:") && !t.starts_with("[confidence:")
-            && !t.starts_with("[links:") && !t.starts_with("[linked from:")
+        !t.is_empty() && !crate::text::is_metadata_line(t)
     }).unwrap_or("")
 }
 

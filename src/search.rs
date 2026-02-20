@@ -50,7 +50,7 @@ pub fn run_brief(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter,
         let tags = extract_tags(&r.lines);
         let tag_suffix = tags.map(|t| format!(" {t}")).unwrap_or_default();
         let content = r.lines.iter().skip(1)
-            .find(|l| !l.starts_with("[tags:") && !l.trim().is_empty())
+            .find(|l| !crate::text::is_metadata_line(l) && !l.trim().is_empty())
             .map(|l| truncate(l.trim().trim_start_matches("- "), 80))
             .unwrap_or("");
         let _ = writeln!(out, "  [{}] {content}{tag_suffix}", r.name);
@@ -79,7 +79,7 @@ pub fn run_medium(dir: &Path, query: &str, limit: Option<usize>, filter: &Filter
         }
         let mut content_lines = 0;
         for line in r.lines.iter().skip(1) {
-            if line.starts_with("[tags:") || line.trim().is_empty() { continue; }
+            if crate::text::is_metadata_line(line) || line.trim().is_empty() { continue; }
             let _ = writeln!(out, "    {}", truncate(line.trim(), 100));
             content_lines += 1;
             if content_lines >= 2 { break; }
@@ -141,7 +141,7 @@ pub fn run_grouped(dir: &Path, query: &str, limit_per_topic: Option<usize>, filt
             let header = r.lines.first().map(|s| s.as_str()).unwrap_or("??");
             let _ = write!(out, "  {} — ", header.trim_start_matches("## "));
             if let Some(line) = r.lines.iter().skip(1)
-                .find(|l| !l.starts_with("[tags:") && !l.starts_with("[source:") && !l.starts_with("[type:") && !l.starts_with("[confidence:") && !l.starts_with("[links:") && !l.trim().is_empty()) {
+                .find(|l| !crate::text::is_metadata_line(l) && !l.trim().is_empty()) {
                 let _ = writeln!(out, "{}", truncate(line.trim(), 90));
             } else { let _ = writeln!(out); }
         }

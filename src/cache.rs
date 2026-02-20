@@ -15,7 +15,7 @@ pub struct CachedEntry {
     pub offset: u32,
     pub tf_map: FxHashMap<String, usize>,
     pub word_count: usize,
-    pub tags_raw: Option<String>,
+    pub tags: Vec<String>, // pre-parsed from [tags: ...] metadata — no re-parsing on access
     pub source: Option<String>,
     pub confidence: f64, // 0.0-1.0, default 1.0; explicit from [confidence:] metadata
     pub links: Vec<(String, usize)>, // (topic, entry_index) from [links:] metadata
@@ -23,14 +23,9 @@ pub struct CachedEntry {
 }
 
 impl CachedEntry {
-    /// Parse tags from cached tags_raw field.
-    pub fn tags(&self) -> Vec<&str> {
-        crate::text::parse_tags_raw(self.tags_raw.as_deref())
-    }
-    /// Check if entry has a specific tag (tags are already lowercase).
+    /// Check if entry has a specific tag. O(tags) slice scan, no re-parsing.
     pub fn has_tag(&self, tag: &str) -> bool {
-        crate::text::parse_tags_raw(self.tags_raw.as_deref())
-            .iter().any(|t| *t == tag)
+        self.tags.iter().any(|t| t == tag)
     }
     /// Format timestamp as "YYYY-MM-DD HH:MM".
     pub fn date_str(&self) -> String {
@@ -98,25 +93,15 @@ where F: FnOnce(&[CachedEntry]) -> R {
             Some(t) => t.clone(),
             None => { let t = InternedStr::new(&e.topic); interned.push(t.clone()); t }
         };
-        let source = crate::text::extract_source(&e.body);
+        // Single-pass metadata extraction: replaces 4 separate line scans
+        let meta = crate::text::extract_all_metadata(&e.body);
         let mut tf_map: FxHashMap<String, usize> = crate::fxhash::map_with_capacity(32);
         let word_count = crate::text::tokenize_into_tfmap(&e.body, &mut tf_map);
-        let tags_raw = e.body.lines()
-            .find(|l| l.starts_with("[tags: "))
-            .map(|l| l.to_string());
-        let confidence = e.body.lines()
-            .find_map(|l| l.strip_prefix("[confidence: ")
-                .and_then(|s| s.strip_suffix(']'))
-                .and_then(|s| s.trim().parse::<f64>().ok()))
-            .unwrap_or(1.0);
-        let links = parse_links(&e.body);
         let snippet = build_snippet(topic.as_str(), e.timestamp_min, &e.body);
         entries.push(CachedEntry {
-            topic,
-            body: e.body,
-            timestamp_min: e.timestamp_min,
-            offset: e.offset,
-            tf_map, word_count, tags_raw, source, confidence, links, snippet,
+            topic, body: e.body, timestamp_min: e.timestamp_min, offset: e.offset,
+            tf_map, word_count, tags: meta.tags, source: meta.source,
+            confidence: meta.confidence, links: meta.links, snippet,
         });
     }
 
@@ -138,20 +123,14 @@ pub fn append_to_cache(dir: &Path, topic: &str, body: &str, ts_min: i32, offset:
         .find(|e| e.topic.as_str() == topic)
         .map(|e| e.topic.clone())
         .unwrap_or_else(|| InternedStr::new(topic));
-    let source = crate::text::extract_source(body);
+    let meta = crate::text::extract_all_metadata(body);
     let mut tf_map = crate::fxhash::map_with_capacity(32);
     let word_count = crate::text::tokenize_into_tfmap(body, &mut tf_map);
-    let tags_raw = body.lines().find(|l| l.starts_with("[tags: ")).map(|l| l.to_string());
-    let confidence = body.lines()
-        .find_map(|l| l.strip_prefix("[confidence: ")
-            .and_then(|s| s.strip_suffix(']'))
-            .and_then(|s| s.trim().parse::<f64>().ok()))
-        .unwrap_or(1.0);
-    let links = parse_links(body);
     let snippet = build_snippet(topic, ts_min, body);
     cache.entries.push(CachedEntry {
         topic: topic_interned, body: body.to_string(), timestamp_min: ts_min,
-        offset, tf_map, word_count, tags_raw, source, confidence, links, snippet,
+        offset, tf_map, word_count, tags: meta.tags, source: meta.source,
+        confidence: meta.confidence, links: meta.links, snippet,
     });
     cache.mtime = cur_mtime;
 }
@@ -173,25 +152,7 @@ pub fn stats() -> CacheStats {
 fn build_snippet(topic: &str, ts_min: i32, body: &str) -> String {
     let date = crate::time::minutes_to_date_str(ts_min);
     let lines: Vec<&str> = body.lines()
-        .filter(|l| !l.starts_with("[tags:") && !l.starts_with("[source:")
-            && !l.starts_with("[type:") && !l.starts_with("[modified:")
-            && !l.starts_with("[confidence:") && !l.starts_with("[links:")
-            && !l.trim().is_empty())
+        .filter(|l| !crate::text::is_metadata_line(l) && !l.trim().is_empty())
         .take(2).collect();
     format!("[{}] {} {}", topic, date, crate::text::truncate(&lines.join(" "), 120))
-}
-
-/// Parse `[links: topic:idx topic:idx]` metadata from entry body.
-fn parse_links(body: &str) -> Vec<(String, usize)> {
-    body.lines()
-        .find_map(|l| l.strip_prefix("[links: ").and_then(|s| s.strip_suffix(']')))
-        .map(|inner| {
-            inner.split_whitespace()
-                .filter_map(|pair| {
-                    let (topic, idx) = pair.rsplit_once(':')?;
-                    Some((topic.to_string(), idx.parse().ok()?))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }

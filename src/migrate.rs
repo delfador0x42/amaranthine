@@ -14,7 +14,7 @@ pub fn run(dir: &Path, apply: bool) -> Result<String, String> {
     for e in &entries {
         if e.timestamp_min != 0 { continue; }
         let preview = e.body.lines()
-            .find(|l| !l.trim().is_empty() && !l.starts_with("[tags:"))
+            .find(|l| !l.trim().is_empty() && !crate::text::is_metadata_line(l))
             .map(|l| { let t = l.trim(); if t.len() > 60 { &t[..60] } else { t } })
             .unwrap_or("(empty)");
         let _ = writeln!(out, "  [{}] no timestamp: {preview}", e.topic);

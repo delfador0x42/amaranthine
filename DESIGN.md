@@ -89,7 +89,12 @@ Cache reload optimizations:
 - **InternedStr** (`intern.rs`): Arc<str> newtype for topic names. ~45 unique
   topics shared across ~1000 entries. Clone = atomic refcount bump, no heap alloc.
 - **FxHash** (`fxhash.rs`): non-cryptographic hasher (~3ns vs SipHash ~20ns).
-- **Single-pass construction**: build tf_map from tokens, derive token_set from keys.
+- **Single-pass metadata**: `text::extract_all_metadata()` extracts tags, source,
+  confidence, links in one body scan (was 4 separate passes).
+- **Pre-parsed tags**: `CachedEntry.tags: Vec<String>` parsed once during corpus
+  load. `has_tag()` = simple slice iteration (no re-parsing).
+- **is_metadata_line()**: single inline function replaces 12+ duplicated metadata
+  skip patterns across search, topics, compact, migrate, xref, compress, briefing.
 - **ASCII fast-path tokenizer**: byte-level processing for ASCII content (99%+).
 - **Pre-sized allocations**: `with_capacity` on all hot-path Vecs.
 - **Zero redundant lowercasing**: topics/tags stored lowercase by convention.

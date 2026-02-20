@@ -210,6 +210,57 @@ pub fn truncate(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+/// Check if a line is metadata (tags, source, type, modified, etc.).
+/// Fast reject: all metadata lines start with '['.
+#[inline]
+pub fn is_metadata_line(line: &str) -> bool {
+    if !line.starts_with('[') { return false; }
+    line.starts_with("[tags:") || line.starts_with("[source:")
+        || line.starts_with("[type:") || line.starts_with("[modified:")
+        || line.starts_with("[tier:") || line.starts_with("[confidence:")
+        || line.starts_with("[links:") || line.starts_with("[linked from:")
+}
+
+/// All metadata extracted from an entry body in a single pass.
+pub struct EntryMetadata {
+    pub source: Option<String>,
+    pub tags: Vec<String>,
+    pub confidence: f64,
+    pub links: Vec<(String, usize)>,
+}
+
+/// Extract all metadata from entry body in one scan.
+/// Replaces 4 separate line scans (source, tags, confidence, links).
+pub fn extract_all_metadata(body: &str) -> EntryMetadata {
+    let mut source = None;
+    let mut tags = Vec::new();
+    let mut confidence = 1.0;
+    let mut links = Vec::new();
+
+    for line in body.lines() {
+        if !line.starts_with('[') { continue; }
+        if let Some(inner) = line.strip_prefix("[tags: ").and_then(|s| s.strip_suffix(']')) {
+            tags = inner.split(',').map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty()).collect();
+        } else if let Some(s) = line.strip_prefix("[source: ").and_then(|s| s.strip_suffix(']')) {
+            source = Some(s.trim().to_string());
+        } else if let Some(c) = line.strip_prefix("[confidence: ")
+            .and_then(|s| s.strip_suffix(']'))
+            .and_then(|s| s.trim().parse::<f64>().ok()) {
+            confidence = c;
+        } else if let Some(inner) = line.strip_prefix("[links: ").and_then(|s| s.strip_suffix(']')) {
+            links = inner.split_whitespace()
+                .filter_map(|pair| {
+                    let (topic, idx) = pair.rsplit_once(':')?;
+                    Some((topic.to_string(), idx.parse().ok()?))
+                })
+                .collect();
+        }
+    }
+
+    EntryMetadata { source, tags, confidence, links }
+}
+
 /// Extract [source: path/to/file] from entry body text.
 pub fn extract_source(body: &str) -> Option<String> {
     body.lines()

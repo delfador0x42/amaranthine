@@ -193,10 +193,7 @@ fn format_entry_n(out: &mut String, e: &Compressed, max_lines: usize) {
         let _ = writeln!(out, "  {}", crate::text::truncate(chain, 120));
     }
     let lines: Vec<&str> = e.body.lines()
-        .filter(|l| !l.starts_with("[tags:") && !l.starts_with("[source:")
-            && !l.starts_with("[type:") && !l.starts_with("[modified:")
-            && !l.starts_with("[tier:") && !l.starts_with("[confidence:")
-            && !l.starts_with("[links:"))
+        .filter(|l| !crate::text::is_metadata_line(l))
         .collect();
     for l in lines.iter().take(max_lines) { let _ = writeln!(out, "  {}", l.trim()); }
     if lines.len() > max_lines {

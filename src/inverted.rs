@@ -95,9 +95,10 @@ impl IndexBuilder {
     }
 
     /// Build from cached tf_map — no tokenization, no body scanning.
+    /// Accepts borrowed data from CachedEntry — clones into owned EntryInfo.
     pub fn add_entry_from_tfmap(
-        &mut self, topic_id: u16, snippet: String,
-        date_minutes: i32, source: String, log_offset: u32, tags: Vec<String>,
+        &mut self, topic_id: u16, snippet: &str,
+        date_minutes: i32, source: &str, log_offset: u32, tags: &[String],
         tf_map: &FxHashMap<String, usize>, word_count: usize,
         explicit_confidence: Option<f64>,
     ) -> u32 {
@@ -107,10 +108,12 @@ impl IndexBuilder {
             if term.len() < 2 { continue; }
             self.terms.entry(term.clone()).or_default().push((entry_id, tf.min(u16::MAX as usize) as u16));
         }
-        for tag in &tags { *self.tag_freq.entry(tag.clone()).or_insert(0) += 1; }
+        for tag in tags { *self.tag_freq.entry(tag.clone()).or_insert(0) += 1; }
         self.entries.push(EntryInfo {
             topic_id, word_count: word_count.min(u16::MAX as usize) as u16,
-            snippet, date_minutes, source, log_offset, tags, explicit_confidence,
+            snippet: snippet.to_string(), date_minutes,
+            source: source.to_string(), log_offset,
+            tags: tags.to_vec(), explicit_confidence,
         });
         entry_id
     }
@@ -358,11 +361,10 @@ fn rebuild_inner(dir: &Path, persist: bool) -> Result<(String, Vec<u8>), String>
         let mut builder = IndexBuilder::new();
         for e in cached {
             let tid = builder.add_topic(&e.topic);
-            let source = e.source.as_deref().unwrap_or("").to_string();
-            let tags: Vec<String> = e.tags().iter().map(|t| t.to_string()).collect();
             let conf = if e.confidence < 1.0 { Some(e.confidence) } else { None };
             builder.add_entry_from_tfmap(
-                tid, e.snippet.clone(), e.timestamp_min, source, e.offset, tags,
+                tid, &e.snippet, e.timestamp_min,
+                e.source.as_deref().unwrap_or(""), e.offset, &e.tags,
                 &e.tf_map, e.word_count, conf,
             );
         }

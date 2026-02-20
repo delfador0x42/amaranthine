@@ -34,7 +34,7 @@ fn list_inner(dir: &Path, compact: bool) -> Result<String, String> {
         for e in cached {
             let info = topics.entry(e.topic.to_string()).or_default();
             info.count += 1;
-            collect_tags_from_body(&e.body, &mut info.tags);
+            for t in &e.tags { info.tags.insert(t.clone()); }
             info.last_preview = entry_preview(&e.body);
         }
         let mut out = String::new();
@@ -58,21 +58,11 @@ struct TopicInfo {
     last_preview: String,
 }
 
-fn collect_tags_from_body(body: &str, tags: &mut std::collections::BTreeSet<String>) {
-    for line in body.lines() {
-        for t in crate::text::parse_tags_raw(Some(line)) {
-            tags.insert(t.to_string());
-        }
-    }
-}
-
 fn entry_preview(body: &str) -> String {
     body.lines()
         .find(|l| {
             let t = l.trim();
-            !t.is_empty() && !t.starts_with("[tags:") && !t.starts_with("[source:")
-                && !t.starts_with("[type:") && !t.starts_with("[modified:")
-                && !t.starts_with("[confidence:") && !t.starts_with("[links:")
+            !t.is_empty() && !crate::text::is_metadata_line(t)
         })
         .map(|l| {
             let clean = l.trim().trim_start_matches("- ");

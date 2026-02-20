@@ -35,7 +35,7 @@ pub fn run(dir: &Path, query: &str) -> Result<String, String> {
             entries.push(RawEntry {
                 topic: e.topic.to_string(), body: e.body.clone(),
                 timestamp_min: e.timestamp_min, days_old,
-                tags: e.tags().iter().map(|t| t.to_string()).collect(), relevance,
+                tags: e.tags.clone(), relevance,
             });
         }
 
@@ -56,7 +56,7 @@ pub fn run(dir: &Path, query: &str) -> Result<String, String> {
                                     topic: le.topic.to_string(),
                                     body: format!("[linked from: {}:{}]\n{}", e.topic, link_idx, le.body),
                                     timestamp_min: le.timestamp_min, days_old,
-                                    tags: le.tags().iter().map(|t| t.to_string()).collect(),
+                                    tags: le.tags.clone(),
                                     relevance: 3.0,
                                 });
                                 matched_offsets.insert(le.offset);

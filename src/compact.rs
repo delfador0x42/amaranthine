@@ -88,7 +88,7 @@ fn similarity(a: &str, b: &str) -> f64 {
 
 fn entry_preview(body: &str) -> String {
     body.lines()
-        .find(|l| !l.trim().is_empty() && !l.starts_with("[tags:"))
+        .find(|l| !l.trim().is_empty() && !crate::text::is_metadata_line(l))
         .map(|l| {
             let t = l.trim().trim_start_matches("- ");
             if t.len() > 60 { format!("{}...", &t[..60]) } else { t.to_string() }
@@ -100,7 +100,7 @@ fn merge_bodies(older: &str, newer: &str) -> String {
     let newer_lines: Vec<&str> = newer.trim().lines().collect();
     let mut result = newer.trim().to_string();
     for line in older.trim().lines() {
-        if line.starts_with("[tags:") { continue; }
+        if crate::text::is_metadata_line(line) { continue; }
         if !newer_lines.iter().any(|n| n.trim() == line.trim()) && !line.trim().is_empty() {
             result.push('\n');
             result.push_str(line);
