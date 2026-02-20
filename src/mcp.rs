@@ -58,21 +58,6 @@ pub fn run(dir: &Path) -> Result<(), String> {
         let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
         let id = msg.get("id");
 
-        if method == "tools/call" {
-            let p = msg.get("params");
-            let name = p.and_then(|p| p.get("name")).and_then(|v| v.as_str()).unwrap_or("");
-            if name == "_reload" {
-                let id_json = id_to_json(id);
-                let mut out = stdout.lock();
-                let _ = writeln!(out,
-                    r#"{{"jsonrpc":"2.0","id":{id_json},"result":{{"content":[{{"type":"text","text":"reloading amaranthine..."}}]}}}}"#);
-                let _ = out.flush();
-                drop(out);
-                do_reload();
-                continue;
-            }
-        }
-
         let resp: Option<String> = match method {
             "initialize" => Some(rpc_ok_value(id, init_result())),
             "notifications/initialized" | "initialized" => None,
@@ -87,14 +72,32 @@ pub fn run(dir: &Path) -> Result<(), String> {
                 continue;
             }
             "tools/call" => {
+                // Hot path: streaming write — no intermediate String allocation.
+                // Extract name/args once (was duplicated for _reload check).
                 let p = msg.get("params");
                 let name = p.and_then(|p| p.get("name")).and_then(|v| v.as_str()).unwrap_or("");
-                let args = p.and_then(|p| p.get("arguments"));
                 let id_json = id_to_json(id);
-                Some(match dispatch::dispatch(name, args, dir) {
-                    Ok(text) => rpc_ok_content(&id_json, &text),
-                    Err(e) => rpc_err_str(&id_json, -32603, &e),
-                })
+                if name == "_reload" {
+                    let mut out = stdout.lock();
+                    let _ = writeln!(out,
+                        r#"{{"jsonrpc":"2.0","id":{id_json},"result":{{"content":[{{"type":"text","text":"reloading amaranthine..."}}]}}}}"#);
+                    let _ = out.flush();
+                    drop(out);
+                    do_reload();
+                    continue;
+                }
+                let args = p.and_then(|p| p.get("arguments"));
+                let mut out = stdout.lock();
+                let ok = match dispatch::dispatch(name, args, dir) {
+                    Ok(ref text) => write_rpc_ok(&mut out, &id_json, text),
+                    Err(ref e) => write_rpc_err(&mut out, &id_json, e),
+                };
+                if let Err(e) = ok {
+                    eprintln!("amaranthine: stdout write error: {e}");
+                    break;
+                }
+                let _ = out.flush();
+                continue;
             }
             "ping" => {
                 let id_json = id_to_json(id);
@@ -128,28 +131,63 @@ fn id_to_json(id: Option<&Value>) -> String {
     }
 }
 
-/// Build a JSON-RPC success response with text content — zero Value allocations.
+/// Streaming JSON-RPC success response — writes directly to stdout, zero intermediate String.
 /// This is the hot path for every tools/call response.
-fn rpc_ok_content(id_json: &str, text: &str) -> String {
-    let mut out = String::with_capacity(128 + text.len());
-    out.push_str(r#"{"jsonrpc":"2.0","id":"#);
-    out.push_str(id_json);
-    out.push_str(r#","result":{"content":[{"type":"text","text":""#);
-    crate::hook::json_escape_into(text.as_bytes(), &mut out);
-    out.push_str(r#""}]}}"#);
-    out
+fn write_rpc_ok(w: &mut impl io::Write, id_json: &str, text: &str) -> io::Result<()> {
+    w.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":")?;
+    w.write_all(id_json.as_bytes())?;
+    w.write_all(b",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")?;
+    write_json_escaped(w, text)?;
+    w.write_all(b"\"}]}}\n")
 }
 
-/// Build a JSON-RPC error response — zero Value allocations.
+/// Streaming JSON-RPC error response — writes directly to stdout, zero intermediate String.
+fn write_rpc_err(w: &mut impl io::Write, id_json: &str, msg: &str) -> io::Result<()> {
+    w.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":")?;
+    w.write_all(id_json.as_bytes())?;
+    w.write_all(b",\"error\":{\"code\":-32603,\"message\":\"")?;
+    write_json_escaped(w, msg)?;
+    w.write_all(b"\"}}\n")
+}
+
+/// Write JSON-escaped string directly to a writer (no intermediate String allocation).
+/// Byte-level chunk-copy: scans for escape-needing bytes, writes clean chunks via write_all.
+fn write_json_escaped(w: &mut impl io::Write, s: &str) -> io::Result<()> {
+    let bytes = s.as_bytes();
+    let mut last_copy = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        let esc: &[u8] = match b {
+            b'"' => b"\\\"",
+            b'\\' => b"\\\\",
+            b'\n' => b"\\n",
+            b'\r' => b"\\r",
+            b'\t' => b"\\t",
+            c if c < 0x20 => {
+                if last_copy < i { w.write_all(&bytes[last_copy..i])?; }
+                write!(w, "\\u{:04x}", c)?;
+                last_copy = i + 1;
+                continue;
+            }
+            _ => continue,
+        };
+        if last_copy < i { w.write_all(&bytes[last_copy..i])?; }
+        w.write_all(esc)?;
+        last_copy = i + 1;
+    }
+    if last_copy < bytes.len() { w.write_all(&bytes[last_copy..])?; }
+    Ok(())
+}
+
+/// Build a JSON-RPC error response as String — used for non-tools/call errors.
 fn rpc_err_str(id_json: &str, code: i64, msg: &str) -> String {
     let mut out = String::with_capacity(128 + msg.len());
     out.push_str(r#"{"jsonrpc":"2.0","id":"#);
     out.push_str(id_json);
     out.push_str(r#","error":{"code":"#);
-    use std::fmt::Write;
+    use std::fmt::Write as _;
     let _ = write!(out, "{code}");
     out.push_str(r#","message":""#);
-    crate::hook::json_escape_into(msg.as_bytes(), &mut out);
+    crate::json::escape_into(msg, &mut out);
     out.push_str(r#""}}"#);
     out
 }
@@ -266,7 +304,7 @@ fn init_result() -> Value {
         ])),
         ("serverInfo".into(), Value::Obj(vec![
             ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("6.3.0".into())),
+            ("version".into(), Value::Str("6.4.0".into())),
         ])),
     ])
 }

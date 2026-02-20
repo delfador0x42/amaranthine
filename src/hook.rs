@@ -27,55 +27,13 @@ pub fn run(hook_type: &str, dir: &Path) -> Result<String, String> {
 }
 
 /// Build hook JSON output with direct string formatting — zero Value allocations.
-/// JSON-escapes the context string inline.
+/// JSON-escapes the context string inline via json::escape_into.
 fn hook_output(context: &str) -> String {
     let mut out = String::with_capacity(64 + context.len());
     out.push_str(r#"{"hookSpecificOutput":{"additionalContext":""#);
-    json_escape_into(context.as_bytes(), &mut out);
+    crate::json::escape_into(context, &mut out);
     out.push_str(r#""}}"#);
     out
-}
-
-/// Escape a string for JSON embedding (no surrounding quotes).
-/// Public for use by mcp.rs response formatting.
-/// Handles UTF-8 correctly by working on &str and escaping only JSON-special chars.
-pub fn json_escape_into(s: &[u8], buf: &mut String) {
-    // Fast path: scan for chars that need escaping
-    let mut i = 0;
-    let mut last_copy = 0;
-    while i < s.len() {
-        let c = s[i];
-        let escape = match c {
-            b'"' => Some("\\\""),
-            b'\\' => Some("\\\\"),
-            b'\n' => Some("\\n"),
-            b'\r' => Some("\\r"),
-            b'\t' => Some("\\t"),
-            c if c < 0x20 => None, // handled below
-            _ => { i += 1; continue; }
-        };
-        // Copy everything before this char
-        if last_copy < i {
-            // Safety: input is valid UTF-8 (came from &str), and we only break at ASCII
-            if let Ok(chunk) = std::str::from_utf8(&s[last_copy..i]) {
-                buf.push_str(chunk);
-            }
-        }
-        if let Some(esc) = escape {
-            buf.push_str(esc);
-        } else {
-            use std::fmt::Write;
-            let _ = write!(buf, "\\u{:04x}", c);
-        }
-        i += 1;
-        last_copy = i;
-    }
-    // Copy trailing chunk
-    if last_copy < s.len() {
-        if let Ok(chunk) = std::str::from_utf8(&s[last_copy..]) {
-            buf.push_str(chunk);
-        }
-    }
 }
 
 /// PreToolUse: inject amaranthine entries relevant to the file being accessed.
@@ -129,21 +87,36 @@ fn ambient(input: &str, dir: &Path) -> Result<String, String> {
 /// Fast JSON string extraction: find "key":"value" without full parse.
 /// Returns the unescaped value or None if not found.
 /// Works for simple string values (no nested escapes needed for our keys).
+/// Uses stack-allocated needle — zero heap allocation.
 /// Public for use by sock.rs.
 pub fn extract_json_str<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    // Search for "key":" pattern
-    let needle = if key.starts_with('"') {
-        // Already quoted (for ambiguous keys like "path")
-        format!("{}:\"", key)
+    // Build needle on stack: "key":" or key:" (if already quoted)
+    let kb = key.as_bytes();
+    let quoted = kb.first() == Some(&b'"');
+    let mut needle_buf = [0u8; 80];
+    let nlen = if quoted {
+        if kb.len() + 2 > needle_buf.len() { return None; }
+        needle_buf[..kb.len()].copy_from_slice(kb);
+        needle_buf[kb.len()] = b':';
+        needle_buf[kb.len() + 1] = b'"';
+        kb.len() + 2
     } else {
-        format!("\"{}\":\"", key)
+        if kb.len() + 4 > needle_buf.len() { return None; }
+        needle_buf[0] = b'"';
+        needle_buf[1..1 + kb.len()].copy_from_slice(kb);
+        needle_buf[1 + kb.len()] = b'"';
+        needle_buf[2 + kb.len()] = b':';
+        needle_buf[3 + kb.len()] = b'"';
+        kb.len() + 4
     };
-    let pos = json.find(&needle)?;
-    let val_start = pos + needle.len();
+    // Safety: needle is ASCII (keys are ASCII identifiers)
+    let needle = unsafe { std::str::from_utf8_unchecked(&needle_buf[..nlen]) };
+    let pos = json.find(needle)?;
+    let val_start = pos + nlen;
     // Find closing quote (handle escaped quotes)
     let rest = &json[val_start..];
-    let mut end = 0;
     let bytes = rest.as_bytes();
+    let mut end = 0;
     while end < bytes.len() {
         if bytes[end] == b'"' && (end == 0 || bytes[end - 1] != b'\\') {
             return Some(&rest[..end]);
@@ -244,18 +217,25 @@ fn extract_removed_syms(input: &crate::json::Value, stem: &str) -> Vec<String> {
 }
 
 /// Run ambient queries against index data (disk fallback path).
+/// Zero format!() calls — all output built with push_str.
 fn query_ambient(data: &[u8], stem: &str, syms: &[String]) -> String {
     let results = crate::binquery::search(data, stem, 5).unwrap_or_default();
     let has_results = !results.is_empty() && !results.starts_with("0 match");
 
-    let sq = format!("structural {stem}");
+    let mut sq = String::with_capacity(12 + stem.len());
+    sq.push_str("structural ");
+    sq.push_str(stem);
     let structural = crate::binquery::search(data, &sq, 3).unwrap_or_default();
     let has_structural = !structural.is_empty() && !structural.starts_with("0 match");
 
     let mut refactor = String::new();
     if !syms.is_empty() {
-        let sym_list = syms.join(", ");
-        refactor.push_str(&format!("\nREFACTOR IMPACT (symbols modified: {sym_list}):\n"));
+        refactor.push_str("\nREFACTOR IMPACT (symbols modified: ");
+        for (i, sym) in syms.iter().enumerate() {
+            if i > 0 { refactor.push_str(", "); }
+            refactor.push_str(sym);
+        }
+        refactor.push_str("):\n");
         for sym in syms {
             let hits = crate::binquery::search(data, sym, 3).unwrap_or_default();
             if !hits.is_empty() && !hits.starts_with("0 match") {
@@ -267,10 +247,16 @@ fn query_ambient(data: &[u8], stem: &str, syms: &[String]) -> String {
     if !has_results && !has_structural && !has_refactor { return String::new(); }
 
     let mut out = String::new();
-    if has_results { out.push_str(&format!("amaranthine entries for {stem}:\n{results}")); }
+    if has_results {
+        out.push_str("amaranthine entries for ");
+        out.push_str(stem);
+        out.push_str(":\n");
+        out.push_str(&results);
+    }
     if has_structural {
         if has_results { out.push_str("\n---\n"); }
-        out.push_str(&format!("structural coupling:\n{structural}"));
+        out.push_str("structural coupling:\n");
+        out.push_str(&structural);
     }
     if has_refactor {
         if has_results || has_structural { out.push_str("\n---\n"); }

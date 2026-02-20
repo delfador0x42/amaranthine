@@ -98,14 +98,20 @@ fn handle_search(req: &crate::json::Value) -> String {
 
 /// Return topic table from in-memory index.
 /// Request: {"op":"topics"}
+/// Direct String building: sort topic tuples, then push_str — no intermediate Vec<String>.
 fn handle_topics() -> String {
     crate::mcp::with_index(|data| {
-        let topics = crate::binquery::topic_table(data).unwrap_or_default();
-        let mut list: Vec<String> = topics.iter()
-            .map(|(_, name, count)| format!("{name} ({count})"))
-            .collect();
-        list.sort();
-        list.join(", ")
+        let mut topics = crate::binquery::topic_table(data).unwrap_or_default();
+        topics.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+        let mut out = String::with_capacity(topics.len() * 24);
+        for (i, (_, name, count)) in topics.iter().enumerate() {
+            if i > 0 { out.push_str(", "); }
+            out.push_str(name);
+            out.push_str(" (");
+            itoa_push(&mut out, *count as u32);
+            out.push(')');
+        }
+        out
     }).unwrap_or_default()
 }
 
@@ -126,18 +132,36 @@ fn handle_ambient_fast(line: &str) -> String {
 }
 
 /// Shared ambient query logic used by both socket and disk-fallback paths.
+/// Zero format!() calls — all output built with push_str.
 fn query_ambient_core(data: &[u8], stem: &str, syms: &[&str]) -> String {
     let results = crate::binquery::search(data, stem, 5).unwrap_or_default();
     let has_results = !results.is_empty() && !results.starts_with("0 match");
 
-    let sq = format!("structural {stem}");
-    let structural = crate::binquery::search(data, &sq, 3).unwrap_or_default();
+    // Stack-allocated query string for structural search
+    let mut sq_buf = [0u8; 128];
+    let sq_prefix = b"structural ";
+    let sq_len = sq_prefix.len() + stem.len();
+    let structural = if sq_len <= sq_buf.len() {
+        sq_buf[..sq_prefix.len()].copy_from_slice(sq_prefix);
+        sq_buf[sq_prefix.len()..sq_len].copy_from_slice(stem.as_bytes());
+        let sq = unsafe { std::str::from_utf8_unchecked(&sq_buf[..sq_len]) };
+        crate::binquery::search(data, sq, 3).unwrap_or_default()
+    } else {
+        let mut sq = String::with_capacity(sq_len);
+        sq.push_str("structural ");
+        sq.push_str(stem);
+        crate::binquery::search(data, &sq, 3).unwrap_or_default()
+    };
     let has_structural = !structural.is_empty() && !structural.starts_with("0 match");
 
     let mut refactor = String::new();
     if !syms.is_empty() {
-        let sym_list = syms.join(", ");
-        refactor.push_str(&format!("\nREFACTOR IMPACT (symbols modified: {sym_list}):\n"));
+        refactor.push_str("\nREFACTOR IMPACT (symbols modified: ");
+        for (i, sym) in syms.iter().enumerate() {
+            if i > 0 { refactor.push_str(", "); }
+            refactor.push_str(sym);
+        }
+        refactor.push_str("):\n");
         for sym in syms {
             let hits = crate::binquery::search(data, sym, 3).unwrap_or_default();
             if !hits.is_empty() && !hits.starts_with("0 match") {
@@ -149,16 +173,39 @@ fn query_ambient_core(data: &[u8], stem: &str, syms: &[&str]) -> String {
     if !has_results && !has_structural && !has_refactor { return String::new(); }
 
     let mut out = String::new();
-    if has_results { out.push_str(&format!("amaranthine entries for {stem}:\n{results}")); }
+    if has_results {
+        out.push_str("amaranthine entries for ");
+        out.push_str(stem);
+        out.push_str(":\n");
+        out.push_str(&results);
+    }
     if has_structural {
         if has_results { out.push_str("\n---\n"); }
-        out.push_str(&format!("structural coupling:\n{structural}"));
+        out.push_str("structural coupling:\n");
+        out.push_str(&structural);
     }
     if has_refactor {
         if has_results || has_structural { out.push_str("\n---\n"); }
         out.push_str(&refactor);
     }
     out
+}
+
+/// Fast integer-to-string push without format!(). Handles 0-65535 (u16 range).
+fn itoa_push(buf: &mut String, n: u32) {
+    if n == 0 { buf.push('0'); return; }
+    let mut digits = [0u8; 10];
+    let mut i = 0;
+    let mut v = n;
+    while v > 0 {
+        digits[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        buf.push(digits[i] as char);
+    }
 }
 
 /// Extract string array from "syms":["a","b","c"] without full JSON parse.

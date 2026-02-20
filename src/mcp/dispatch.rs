@@ -12,20 +12,20 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
     }
     match name {
         "store" => {
-            let topic = arg_str(args, "topic");
-            let text = arg_str(args, "text");
-            let tags = arg_str(args, "tags");
-            let tags = if tags.is_empty() { None } else { Some(tags.as_str()) };
+            let topic = arg_ref(args, "topic");
+            let text = arg_ref(args, "text");
+            let tags = arg_ref(args, "tags");
+            let tags = if tags.is_empty() { None } else { Some(tags) };
             let force = arg_bool(args, "force");
             let terse = arg_bool(args, "terse");
-            let source = arg_str(args, "source");
-            let source = if source.is_empty() { None } else { Some(source.as_str()) };
-            let conf_str = arg_str(args, "confidence");
+            let source = arg_ref(args, "source");
+            let source = if source.is_empty() { None } else { Some(source) };
+            let conf_str = arg_ref(args, "confidence");
             let confidence = conf_str.parse::<f64>().ok().filter(|c| *c >= 0.0 && *c <= 1.0);
-            let links_str = arg_str(args, "links");
-            let links = if links_str.is_empty() { None } else { Some(links_str.as_str()) };
-            let result = crate::store::run_full_ext(dir, &topic, &text, tags, force, source, confidence, links)?;
-            super::after_write(dir, &topic);
+            let links = arg_ref(args, "links");
+            let links = if links.is_empty() { None } else { Some(links) };
+            let result = crate::store::run_full_ext(dir, topic, text, tags, force, source, confidence, links)?;
+            super::after_write(dir, topic);
             super::log_session(format!("[{}] {}", topic,
                 result.lines().next().unwrap_or("stored")));
             if terse {
@@ -35,10 +35,10 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             }
         }
         "append" => {
-            let topic = arg_str(args, "topic");
-            let text = arg_str(args, "text");
-            let result = crate::store::append(dir, &topic, &text)?;
-            super::after_write(dir, &topic);
+            let topic = arg_ref(args, "topic");
+            let text = arg_ref(args, "text");
+            let result = crate::store::append(dir, topic, text)?;
+            super::after_write(dir, topic);
             Ok(result)
         }
         "batch_store" => {
@@ -128,20 +128,20 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             }
         }
         "search" => {
-            let query = arg_str(args, "query");
-            let detail = arg_str(args, "detail");
+            let query = arg_ref(args, "query");
+            let detail = arg_ref(args, "detail");
             let filter = build_filter(args);
-            match detail.as_str() {
-                "count" => crate::search::count(dir, &query, &filter),
-                "topics" => crate::search::run_topics(dir, &query, &filter),
+            match detail {
+                "count" => crate::search::count(dir, query, &filter),
+                "topics" => crate::search::run_topics(dir, query, &filter),
                 _ => {
-                    let limit = arg_str(args, "limit").parse::<usize>().ok();
+                    let limit = arg_ref(args, "limit").parse::<usize>().ok();
                     let guard = super::INDEX.read().map_err(|e| e.to_string())?;
                     let idx = guard.as_ref().map(|i| i.data.as_slice());
-                    let result = match detail.as_str() {
-                        "full" => crate::search::run(dir, &query, true, limit, &filter, idx),
-                        "brief" => crate::search::run_brief(dir, &query, limit, &filter, idx),
-                        _ => crate::search::run_medium(dir, &query, limit, &filter, idx),
+                    let result = match detail {
+                        "full" => crate::search::run(dir, query, true, limit, &filter, idx),
+                        "brief" => crate::search::run_brief(dir, query, limit, &filter, idx),
+                        _ => crate::search::run_medium(dir, query, limit, &filter, idx),
                     };
                     drop(guard);
                     result
@@ -149,9 +149,9 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             }
         }
         "context" => {
-            let q = arg_str(args, "query");
-            let q = if q.is_empty() { None } else { Some(q.as_str()) };
-            let brief = arg_str(args, "brief");
+            let q = arg_ref(args, "query");
+            let q = if q.is_empty() { None } else { Some(q) };
+            let brief = arg_ref(args, "brief");
             if brief == "true" {
                 crate::context::run_brief(dir, q, true)
             } else {
@@ -160,148 +160,148 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
         }
         "topics" => crate::topics::list_compact(dir),
         "recent" => {
-            let h = arg_str(args, "hours");
+            let h = arg_ref(args, "hours");
             if let Ok(hours) = h.parse::<u64>() {
                 crate::topics::recent_hours(dir, hours, true)
             } else {
-                let d = arg_str(args, "days");
+                let d = arg_ref(args, "days");
                 let days = d.parse().unwrap_or(7u64);
                 crate::topics::recent(dir, days, true)
             }
         }
         "delete" => {
-            let topic = arg_str(args, "topic");
+            let topic = arg_ref(args, "topic");
             let all = arg_bool(args, "all");
             let result = if all {
-                crate::delete::run(dir, &topic, false, true, None)
+                crate::delete::run(dir, topic, false, true, None)
             } else {
-                let idx_str = arg_str(args, "index");
-                let m = arg_str(args, "match_str");
+                let idx_str = arg_ref(args, "index");
+                let m = arg_ref(args, "match_str");
                 if !idx_str.is_empty() {
                     let idx: usize = idx_str.parse()
                         .map_err(|_| format!("invalid index: '{idx_str}'"))?;
-                    crate::delete::run_by_index(dir, &topic, idx)
+                    crate::delete::run_by_index(dir, topic, idx)
                 } else if !m.is_empty() {
-                    crate::delete::run(dir, &topic, false, false, Some(m.as_str()))
+                    crate::delete::run(dir, topic, false, false, Some(m))
                 } else {
-                    crate::delete::run(dir, &topic, true, false, None)
+                    crate::delete::run(dir, topic, true, false, None)
                 }
             }?;
-            super::after_write(dir, &topic);
+            super::after_write(dir, topic);
             Ok(result)
         }
         "append_entry" => {
-            let topic = arg_str(args, "topic");
-            let text = arg_str(args, "text");
-            let idx_str = arg_str(args, "index");
-            let needle = arg_str(args, "match_str");
-            let tag = arg_str(args, "tag");
+            let topic = arg_ref(args, "topic");
+            let text = arg_ref(args, "text");
+            let idx_str = arg_ref(args, "index");
+            let needle = arg_ref(args, "match_str");
+            let tag = arg_ref(args, "tag");
             let result = if !idx_str.is_empty() {
                 let idx: usize = idx_str.parse()
                     .map_err(|_| format!("invalid index: '{idx_str}'"))?;
-                crate::edit::append_by_index(dir, &topic, idx, &text)
+                crate::edit::append_by_index(dir, topic, idx, text)
             } else if !tag.is_empty() {
-                crate::edit::append_by_tag(dir, &topic, &tag, &text)
+                crate::edit::append_by_tag(dir, topic, tag, text)
             } else {
-                crate::edit::append(dir, &topic, &needle, &text)
+                crate::edit::append(dir, topic, needle, text)
             }?;
-            super::after_write(dir, &topic);
+            super::after_write(dir, topic);
             Ok(result)
         }
         "update_entry" => {
-            let topic = arg_str(args, "topic");
-            let text = arg_str(args, "text");
-            let idx_str = arg_str(args, "index");
-            let needle = arg_str(args, "match_str");
+            let topic = arg_ref(args, "topic");
+            let text = arg_ref(args, "text");
+            let idx_str = arg_ref(args, "index");
+            let needle = arg_ref(args, "match_str");
             let result = if !idx_str.is_empty() {
                 let idx: usize = idx_str.parse()
                     .map_err(|_| format!("invalid index: '{idx_str}'"))?;
-                crate::edit::run_by_index(dir, &topic, idx, &text)
+                crate::edit::run_by_index(dir, topic, idx, text)
             } else {
-                crate::edit::run(dir, &topic, &needle, &text)
+                crate::edit::run(dir, topic, needle, text)
             }?;
-            super::after_write(dir, &topic);
+            super::after_write(dir, topic);
             Ok(result)
         }
         "read_topic" => {
-            let topic = arg_str(args, "topic");
-            crate::topics::read_topic(dir, &topic)
+            let topic = arg_ref(args, "topic");
+            crate::topics::read_topic(dir, topic)
         }
         "digest" => crate::digest::run(dir),
         "list_tags" => crate::stats::list_tags(dir),
         "stats" => crate::stats::stats_fast(dir),
         "list_entries" => {
-            let topic = arg_str(args, "topic");
-            let m = arg_str(args, "match_str");
-            let match_str = if m.is_empty() { None } else { Some(m.as_str()) };
-            crate::stats::list_entries(dir, &topic, match_str)
+            let topic = arg_ref(args, "topic");
+            let m = arg_ref(args, "match_str");
+            let match_str = if m.is_empty() { None } else { Some(m) };
+            crate::stats::list_entries(dir, topic, match_str)
         }
         "prune" => {
-            let d = arg_str(args, "days");
+            let d = arg_ref(args, "days");
             let days = d.parse().unwrap_or(30u64);
             crate::prune::run(dir, days, true)
         }
         "compact" => {
-            let topic = arg_str(args, "topic");
-            let apply = arg_str(args, "apply") == "true";
+            let topic = arg_ref(args, "topic");
+            let apply = arg_ref(args, "apply") == "true";
             let result = if topic.is_empty() {
                 crate::compact::scan(dir)
             } else {
-                crate::compact::run(dir, &topic, apply)
+                crate::compact::run(dir, topic, apply)
             }?;
             if apply { super::after_write(dir, ""); }
             Ok(result)
         }
         "export" => crate::export::export(dir),
         "import" => {
-            let json = arg_str(args, "json");
-            let result = crate::export::import(dir, &json)?;
+            let json = arg_ref(args, "json");
+            let result = crate::export::import(dir, json)?;
             super::after_write(dir, "");
             Ok(result)
         }
         "xref" => {
-            let topic = arg_str(args, "topic");
-            crate::xref::refs_for(dir, &topic)
+            let topic = arg_ref(args, "topic");
+            crate::xref::refs_for(dir, topic)
         }
         "migrate" => {
-            let apply = arg_str(args, "apply") == "true";
+            let apply = arg_ref(args, "apply") == "true";
             crate::migrate::run(dir, apply)
         }
         "get_entry" => {
-            let topic = arg_str(args, "topic");
-            let idx_str = arg_str(args, "index");
+            let topic = arg_ref(args, "topic");
+            let idx_str = arg_ref(args, "index");
             let idx: usize = idx_str.parse()
                 .map_err(|_| format!("invalid index: '{idx_str}'"))?;
-            crate::stats::get_entry(dir, &topic, idx)
+            crate::stats::get_entry(dir, topic, idx)
         }
         "rename_topic" => {
-            let topic = arg_str(args, "topic");
-            let new_name = arg_str(args, "new_name");
-            let result = crate::edit::rename_topic(dir, &topic, &new_name)?;
-            super::after_write(dir, &new_name);
+            let topic = arg_ref(args, "topic");
+            let new_name = arg_ref(args, "new_name");
+            let result = crate::edit::rename_topic(dir, topic, new_name)?;
+            super::after_write(dir, new_name);
             Ok(result)
         }
         "merge_topics" => {
-            let from = arg_str(args, "from");
-            let into = arg_str(args, "into");
-            let result = crate::edit::merge_topics(dir, &from, &into)?;
-            super::after_write(dir, &into);
+            let from = arg_ref(args, "from");
+            let into = arg_ref(args, "into");
+            let result = crate::edit::merge_topics(dir, from, into)?;
+            super::after_write(dir, into);
             Ok(result)
         }
         "tag_entry" => {
-            let topic = arg_str(args, "topic");
-            let idx_str = arg_str(args, "index");
-            let needle = arg_str(args, "match_str");
-            let add_tags = arg_str(args, "tags");
-            let rm_tags = arg_str(args, "remove");
+            let topic = arg_ref(args, "topic");
+            let idx_str = arg_ref(args, "index");
+            let needle = arg_ref(args, "match_str");
+            let add_tags = arg_ref(args, "tags");
+            let rm_tags = arg_ref(args, "remove");
             let idx = if !idx_str.is_empty() {
                 Some(idx_str.parse::<usize>().map_err(|_| format!("invalid index: '{idx_str}'"))?)
             } else { None };
-            let needle = if needle.is_empty() { None } else { Some(needle.as_str()) };
-            let add = if add_tags.is_empty() { None } else { Some(add_tags.as_str()) };
-            let rm = if rm_tags.is_empty() { None } else { Some(rm_tags.as_str()) };
-            let result = crate::edit::tag_entry(dir, &topic, idx, needle, add, rm)?;
-            super::after_write(dir, &topic);
+            let needle = if needle.is_empty() { None } else { Some(needle) };
+            let add = if add_tags.is_empty() { None } else { Some(add_tags) };
+            let rm = if rm_tags.is_empty() { None } else { Some(rm_tags) };
+            let result = crate::edit::tag_entry(dir, topic, idx, needle, add, rm)?;
+            super::after_write(dir, topic);
             Ok(result)
         }
         "rebuild_index" => {
@@ -322,8 +322,8 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             crate::binquery::index_info(&data)
         }
         "index_search" => {
-            let query = arg_str(args, "query");
-            let limit = arg_str(args, "limit").parse::<usize>().unwrap_or(10);
+            let query = arg_ref(args, "query");
+            let limit = arg_ref(args, "limit").parse::<usize>().unwrap_or(10);
             let guard = super::INDEX.read().map_err(|e| e.to_string())?;
             let data = match guard.as_ref() {
                 Some(idx) => std::borrow::Cow::Borrowed(idx.data.as_slice()),
@@ -333,7 +333,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
                         .map_err(|e| format!("index.bin: {e}"))?)
                 }
             };
-            crate::binquery::search(&data, &query, limit)
+            crate::binquery::search(&data, query, limit)
         }
         "session" => {
             let log = super::SESSION_LOG.lock().map_err(|e| e.to_string())?;
@@ -348,18 +348,18 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             }
         }
         "search_entity" => {
-            let query = arg_str(args, "query");
-            let limit = arg_str(args, "limit").parse::<usize>().ok();
+            let query = arg_ref(args, "query");
+            let limit = arg_ref(args, "limit").parse::<usize>().ok();
             let filter = build_filter(args);
             let guard = super::INDEX.read().map_err(|e| e.to_string())?;
             let idx = guard.as_ref().map(|i| i.data.as_slice());
-            let result = crate::search::run_grouped(dir, &query, limit, &filter, idx);
+            let result = crate::search::run_grouped(dir, query, limit, &filter, idx);
             drop(guard);
             result
         }
         "reconstruct" => {
-            let query = arg_str(args, "query");
-            crate::reconstruct::run(dir, &query)
+            let query = arg_ref(args, "query");
+            crate::reconstruct::run(dir, query)
         }
         "compact_log" => {
             let result = crate::datalog::compact_log(dir)?;
@@ -409,6 +409,15 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
     }
 }
 
+/// Borrow string value from args — zero allocation for the common case (string values).
+/// Returns "" if key missing or value is not a string.
+fn arg_ref<'a>(args: Option<&'a Value>, key: &str) -> &'a str {
+    args.and_then(|a| a.get(key))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+}
+
+/// Owned string from args — needed for Num/Bool value conversion.
 fn arg_str(args: Option<&Value>, key: &str) -> String {
     args.and_then(|a| a.get(key))
         .map(|v| match v {
@@ -421,24 +430,26 @@ fn arg_str(args: Option<&Value>, key: &str) -> String {
 }
 
 fn arg_bool(args: Option<&Value>, key: &str) -> bool {
-    let s = arg_str(args, key);
+    let s = arg_ref(args, key);
     s == "true" || s == "1"
 }
 
 fn build_filter(args: Option<&Value>) -> crate::search::Filter {
-    let after = crate::time::resolve_date_shortcut(&arg_str(args, "after"));
-    let before = crate::time::resolve_date_shortcut(&arg_str(args, "before"));
-    let tag = arg_str(args, "tag");
-    let topic = arg_str(args, "topic");
-    let mode = match arg_str(args, "mode").as_str() {
+    let after_raw = arg_ref(args, "after");
+    let before_raw = arg_ref(args, "before");
+    let after = crate::time::resolve_date_shortcut(after_raw);
+    let before = crate::time::resolve_date_shortcut(before_raw);
+    let tag = arg_ref(args, "tag");
+    let topic = arg_ref(args, "topic");
+    let mode = match arg_ref(args, "mode") {
         "or" => crate::search::SearchMode::Or,
         _ => crate::search::SearchMode::And,
     };
     crate::search::Filter {
         after: if after.is_empty() { None } else { crate::time::parse_date_days(&after) },
         before: if before.is_empty() { None } else { crate::time::parse_date_days(&before) },
-        tag: if tag.is_empty() { None } else { Some(tag) },
-        topic: if topic.is_empty() { None } else { Some(topic) },
+        tag: if tag.is_empty() { None } else { Some(tag.to_string()) },
+        topic: if topic.is_empty() { None } else { Some(topic.to_string()) },
         mode,
     }
 }

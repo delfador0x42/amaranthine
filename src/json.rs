@@ -102,21 +102,37 @@ impl Value {
     }
 }
 
-fn escape_into(s: &str, buf: &mut String) {
-    for c in s.chars() {
-        match c {
-            '"' => buf.push_str("\\\""),
-            '\\' => buf.push_str("\\\\"),
-            '\n' => buf.push_str("\\n"),
-            '\r' => buf.push_str("\\r"),
-            '\t' => buf.push_str("\\t"),
-            c if c < '\x20' => {
+/// Escape a string for JSON embedding (no surrounding quotes).
+/// Byte-level chunk-copy: scans for escape-needing bytes, memcpys clean chunks.
+/// Public for use by mcp.rs and hook.rs response formatting.
+pub fn escape_into(s: &str, buf: &mut String) {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut last_copy = 0;
+    while i < bytes.len() {
+        let esc = match bytes[i] {
+            b'"' => "\\\"",
+            b'\\' => "\\\\",
+            b'\n' => "\\n",
+            b'\r' => "\\r",
+            b'\t' => "\\t",
+            c if c < 0x20 => {
+                // Safety: s is &str, slicing at ASCII positions = valid UTF-8
+                if last_copy < i { buf.push_str(&s[last_copy..i]); }
                 use fmt::Write;
-                write!(buf, "\\u{:04x}", c as u32).unwrap();
+                let _ = write!(buf, "\\u{:04x}", c);
+                i += 1;
+                last_copy = i;
+                continue;
             }
-            c => buf.push(c),
-        }
+            _ => { i += 1; continue; }
+        };
+        if last_copy < i { buf.push_str(&s[last_copy..i]); }
+        buf.push_str(esc);
+        i += 1;
+        last_copy = i;
     }
+    if last_copy < bytes.len() { buf.push_str(&s[last_copy..]); }
 }
 
 impl fmt::Display for Value {
@@ -210,7 +226,26 @@ impl Parser<'_> {
     }
 
     fn string(&mut self) -> Result<String, String> {
-        self.pos += 1;
+        self.pos += 1; // skip opening "
+        // Fast path: if no escape sequences, substring copy (one alloc, exact size).
+        // ~95% of MCP protocol strings have no escapes.
+        let start = self.pos;
+        let mut p = start;
+        while p < self.b.len() {
+            match self.b[p] {
+                b'"' => {
+                    // Safety: input is &str.as_bytes() (valid UTF-8), slicing
+                    // between ASCII positions (start after '"', end at '"') is safe.
+                    let s = unsafe { std::str::from_utf8_unchecked(&self.b[start..p]) }
+                        .to_string();
+                    self.pos = p + 1;
+                    return Ok(s);
+                }
+                b'\\' => break, // has escapes, fall through to slow path
+                _ => p += 1,
+            }
+        }
+        // Slow path: string has escape sequences (or is unterminated → will error)
         let mut s = String::new();
         loop {
             let b = self.next()?;
