@@ -95,11 +95,8 @@ fn dedup(entries: &mut Vec<Compressed>) {
 
 /// Supersession: same topic, >60% first_content overlap, >1 day apart → dim older.
 /// Now visible: chain text identifies the superseding entry.
-fn supersede(entries: &mut [Compressed]) {
-    let tokens: Vec<Vec<String>> = entries.iter().map(|e| {
-        first_content(&e.body).split_whitespace()
-            .filter(|w| w.len() >= 3).map(|w| w.to_lowercase()).collect()
-    }).collect();
+/// Uses shared FxHashSet tokens for O(1) intersection lookups.
+fn supersede(entries: &mut [Compressed], tokens: &[FxHashSet<String>]) {
     let mut by_topic: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, e) in entries.iter().enumerate() {
         by_topic.entry(e.topic.as_str()).or_default().push(i);
@@ -111,7 +108,7 @@ fn supersede(entries: &mut [Compressed]) {
             if tokens[i].len() < 3 || superseded_by.contains_key(&i) { continue; }
             for &j in &indices[a+1..] {
                 if tokens[j].len() < 3 || superseded_by.contains_key(&j) { continue; }
-                let isect = tokens[i].iter().filter(|t| tokens[j].contains(t)).count();
+                let isect = tokens[i].iter().filter(|t| tokens[j].contains(t.as_str())).count();
                 let union = tokens[i].len() + tokens[j].len() - isect;
                 if union == 0 || isect * 100 / union < 60 { continue; }
                 if (entries[i].days_old - entries[j].days_old).abs() < 2 { continue; }
@@ -132,7 +129,8 @@ fn supersede(entries: &mut [Compressed]) {
 }
 
 /// Temporal chains: same topic + same dominant entity → compress to timeline.
-fn temporal_chains(entries: &mut Vec<Compressed>) {
+/// Uses shared FxHashSet tokens for O(1) Jaccard intersection in pass 3.
+fn temporal_chains(entries: &mut Vec<Compressed>, tokens: &[FxHashSet<String>]) {
     let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (i, e) in entries.iter().enumerate() {
         if let Some(term) = dominant_term(first_content(&e.body)) {
@@ -187,7 +185,7 @@ fn temporal_chains(entries: &mut Vec<Compressed>) {
         entries[newest].relevance += sorted.len() as f64;
         for &idx in sorted.iter().take(sorted.len() - 1) { remove.push(idx); }
     }
-    // Pass 3: token-similarity grouping for unchained same-topic entries
+    // Pass 3: token-similarity grouping — reuses shared tokens (FxHashSet, O(1) lookups)
     let chained2: std::collections::BTreeSet<usize> = remove.iter().copied()
         .chain(entries.iter().enumerate()
             .filter(|(_, e)| e.chain.is_some()).map(|(i, _)| i))
@@ -198,28 +196,23 @@ fn temporal_chains(entries: &mut Vec<Compressed>) {
             if chained2.contains(&i) { continue; }
             topic_unchained.entry(e.topic.as_str()).or_default().push(i);
         }
-        let tokens: Vec<Vec<String>> = entries.iter().map(|e| {
-            first_content(&e.body).split_whitespace()
-                .filter(|w| w.len() >= 3)
-                .map(|w| w.to_lowercase()).collect()
-        }).collect();
         let mut all_groups = Vec::new();
         for (_, indices) in &topic_unchained {
             if indices.len() < 2 { continue; }
-            let mut groups: Vec<Vec<usize>> = Vec::new();
+            let mut sim: Vec<Vec<usize>> = Vec::new();
             for &i in indices {
                 let mut found = false;
-                for g in &mut groups {
+                for g in &mut sim {
                     let j = g[0];
-                    let isect = tokens[i].iter().filter(|t| tokens[j].contains(t)).count();
+                    let isect = tokens[i].iter().filter(|t| tokens[j].contains(t.as_str())).count();
                     let union = tokens[i].len() + tokens[j].len() - isect;
                     if union > 0 && isect * 100 / union >= 40 {
                         g.push(i); found = true; break;
                     }
                 }
-                if !found { groups.push(vec![i]); }
+                if !found { sim.push(vec![i]); }
             }
-            for g in groups { if g.len() >= 2 { all_groups.push(g); } }
+            for g in sim { if g.len() >= 2 { all_groups.push(g); } }
         }
         all_groups
     };

@@ -362,20 +362,9 @@ fn write_topics(out: &mut String, entries: &[Compressed], primary: &[String]) {
     let _ = writeln!(out, "\n");
 }
 
+/// Alias: write_topics and write_topics_brief were identical. Consolidated.
 fn write_topics_brief(out: &mut String, entries: &[Compressed], primary: &[String]) {
-    let mut info: BTreeMap<&str, (usize, i64)> = BTreeMap::new();
-    for e in entries {
-        let (count, newest) = info.entry(&e.topic).or_insert((0, i64::MAX));
-        *count += 1;
-        if e.days_old < *newest { *newest = e.days_old; }
-    }
-    let _ = write!(out, "TOPICS:");
-    for t in primary {
-        if let Some((c, d)) = info.get(t.as_str()) {
-            let _ = write!(out, " {} ({}{})", t, c, freshness_short(*d));
-        }
-    }
-    let _ = writeln!(out, "\n");
+    write_topics(out, entries, primary);
 }
 
 fn write_graph(out: &mut String, entries: &[Compressed], primary: &[String]) {

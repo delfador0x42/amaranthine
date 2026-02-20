@@ -80,35 +80,39 @@ pub fn run(dir: &Path, query: &str, detail: &str, since_hours: Option<u64>) -> R
         }
 
         // Follow narrative links (1 level) — skip when --since is active
+        // Build (topic, per-topic-idx) → cached-idx lookup for O(1) link resolution
         if max_days.is_none() {
             let has_any_links = cached.iter()
                 .any(|e| !e.links.is_empty() && matched_offsets.contains(&e.offset));
             if has_any_links {
+                // Build lookup: (topic, entry_index_within_topic) → position in cached[]
+                let mut topic_idx_map: std::collections::BTreeMap<(&str, usize), usize> = std::collections::BTreeMap::new();
+                let mut topic_counters: FxHashMap<&str, usize> = FxHashMap::default();
+                for (pos, e) in cached.iter().enumerate() {
+                    let idx = topic_counters.entry(e.topic.as_str()).or_default();
+                    topic_idx_map.insert((e.topic.as_str(), *idx), pos);
+                    *idx += 1;
+                }
                 for e in cached {
                     if !matched_offsets.contains(&e.offset) || e.links.is_empty() { continue; }
                     for (link_topic, link_idx) in &e.links {
-                        let mut idx = 0usize;
-                        for le in cached {
-                            if le.topic.as_str() != link_topic { continue; }
-                            if idx == *link_idx {
-                                if !matched_offsets.contains(&le.offset) {
-                                    let days_old = le.days_old(now_days);
-                                    let le_tidx = offset_tidx.get(&le.offset).copied().unwrap_or(0);
-                                    let le_link_in = link_in_counts.get(&link_key(le.topic.as_str(), le_tidx))
-                                        .copied().unwrap_or(0);
-                                    entries.push(RawEntry {
-                                        topic: le.topic.to_string(),
-                                        body: format!("[linked from: {}:{}]\n{}", e.topic, link_idx, le.body),
-                                        timestamp_min: le.timestamp_min, days_old,
-                                        tags: le.tags.clone(),
-                                        relevance: 3.0 * le.confidence,
-                                        confidence: le.confidence, link_in: le_link_in,
-                                    });
-                                    matched_offsets.insert(le.offset);
-                                }
-                                break;
+                        if let Some(&pos) = topic_idx_map.get(&(link_topic.as_str(), *link_idx)) {
+                            let le = &cached[pos];
+                            if !matched_offsets.contains(&le.offset) {
+                                let days_old = le.days_old(now_days);
+                                let le_tidx = offset_tidx.get(&le.offset).copied().unwrap_or(0);
+                                let le_link_in = link_in_counts.get(&link_key(le.topic.as_str(), le_tidx))
+                                    .copied().unwrap_or(0);
+                                entries.push(RawEntry {
+                                    topic: le.topic.to_string(),
+                                    body: format!("[linked from: {}:{}]\n{}", e.topic, link_idx, le.body),
+                                    timestamp_min: le.timestamp_min, days_old,
+                                    tags: le.tags.clone(),
+                                    relevance: 3.0 * le.confidence,
+                                    confidence: le.confidence, link_in: le_link_in,
+                                });
+                                matched_offsets.insert(le.offset);
                             }
-                            idx += 1;
                         }
                     }
                 }

@@ -26,6 +26,7 @@ pub fn run(dir: &Path) -> Result<(), String> {
     let stdout = io::stdout();
 
     ensure_datalog(dir);
+    recover_index(dir);
 
     // Start Unix socket listener for hook queries against in-memory index
     let _sock_guard = crate::sock::start_listener(dir);
@@ -265,6 +266,26 @@ fn ensure_datalog(dir: &Path) {
     match crate::inverted::rebuild_and_persist(dir) {
         Ok((_, bytes)) => store_index(bytes),
         Err(_) => {} // no index yet, load_index in run() will try disk
+    }
+}
+
+/// Validate existing index.bin; if corrupted or wrong version, rebuild from data.log.
+/// Called on startup before first query, and on any index read failure.
+pub(crate) fn recover_index(dir: &Path) {
+    let index_path = dir.join("index.bin");
+    let needs_rebuild = match std::fs::read(&index_path) {
+        Ok(data) => crate::binquery::read_header(&data).is_err(),
+        Err(_) => true,
+    };
+    if needs_rebuild {
+        eprintln!("amaranthine: index.bin invalid, rebuilding from data.log...");
+        match crate::inverted::rebuild_and_persist(dir) {
+            Ok((msg, bytes)) => {
+                eprintln!("amaranthine: {}", msg.lines().next().unwrap_or("rebuilt"));
+                store_index(bytes);
+            }
+            Err(e) => eprintln!("amaranthine: rebuild failed: {e}"),
+        }
     }
 }
 

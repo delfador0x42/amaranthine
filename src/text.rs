@@ -155,11 +155,13 @@ fn emit_segment_tfmap(original: &str, lower: &str, tf_map: &mut crate::fxhash::F
 }
 
 /// Extract search terms: tokenize + filter stop words + dedup.
+/// Uses FxHashSet for O(1) dedup instead of O(n) Vec::contains.
 pub fn query_terms(query: &str) -> Vec<String> {
     let mut terms = Vec::with_capacity(8);
+    let mut seen = crate::fxhash::FxHashSet::default();
     for token in tokenize(query) {
         if SEARCH_STOP_WORDS.contains(&token.as_str()) { continue; }
-        if !terms.contains(&token) { terms.push(token); }
+        if seen.insert(token.clone()) { terms.push(token); }
     }
     terms
 }
