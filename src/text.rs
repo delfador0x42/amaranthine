@@ -78,6 +78,82 @@ fn emit_segment(original: &str, lower: String, tokens: &mut Vec<String>) {
     tokens.push(lower);
 }
 
+/// Build tf_map directly during tokenization — no intermediate Vec<String>.
+/// Only allocates String keys for unique tokens (first occurrence).
+/// Reuses a stack buffer for ASCII lowercasing (~30% of tokens are repeats → zero alloc).
+pub fn tokenize_into_tfmap(text: &str, tf_map: &mut crate::fxhash::FxHashMap<String, usize>) -> usize {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut word_count = 0usize;
+    let mut pos = 0;
+    let mut lower_buf = Vec::with_capacity(32);
+    while pos < len {
+        while pos < len && !bytes[pos].is_ascii_alphanumeric() && bytes[pos] < 128 { pos += 1; }
+        if pos >= len { break; }
+        if bytes[pos] >= 128 {
+            let start = pos;
+            while pos < len && (bytes[pos] >= 128 || bytes[pos].is_ascii_alphanumeric()) { pos += 1; }
+            let segment = &text[start..pos];
+            let lower = segment.to_lowercase();
+            if lower.len() >= 2 {
+                word_count += emit_segment_tfmap(segment, &lower, tf_map);
+            }
+            continue;
+        }
+        let start = pos;
+        while pos < len && bytes[pos].is_ascii_alphanumeric() { pos += 1; }
+        let seg = &bytes[start..pos];
+        if seg.len() < 2 { continue; }
+        // Lowercase into reusable buffer (no heap alloc)
+        lower_buf.clear();
+        lower_buf.extend_from_slice(seg);
+        lower_buf.make_ascii_lowercase();
+        let lower_str = unsafe { std::str::from_utf8_unchecked(&lower_buf) };
+        // CamelCase splitting
+        if seg[1..].iter().any(|b| b.is_ascii_uppercase()) {
+            let original = &text[start..pos];
+            let parts = split_compound_ascii(original);
+            if parts.len() > 1 {
+                for part in &parts {
+                    if part.len() >= 2 && part != lower_str {
+                        word_count += 1;
+                        if let Some(c) = tf_map.get_mut(part.as_str()) { *c += 1; }
+                        else { tf_map.insert(part.clone(), 1); }
+                    }
+                }
+            }
+        }
+        word_count += 1;
+        // HashMap lookup with &str, only allocate String on first occurrence
+        if let Some(c) = tf_map.get_mut(lower_str) { *c += 1; }
+        else { tf_map.insert(lower_str.to_string(), 1); }
+    }
+    word_count
+}
+
+/// Emit a CamelCase/Unicode segment directly into tf_map. Returns token count.
+#[inline]
+fn emit_segment_tfmap(original: &str, lower: &str, tf_map: &mut crate::fxhash::FxHashMap<String, usize>) -> usize {
+    let bytes = original.as_bytes();
+    let mut count = 0;
+    if bytes.len() >= 2 && bytes[1..].iter().any(|b| b.is_ascii_uppercase()) {
+        let parts = split_compound_ascii(original);
+        if parts.len() > 1 {
+            for part in &parts {
+                if part.len() >= 2 && part != lower {
+                    count += 1;
+                    if let Some(c) = tf_map.get_mut(part.as_str()) { *c += 1; }
+                    else { tf_map.insert(part.clone(), 1); }
+                }
+            }
+        }
+    }
+    count += 1;
+    if let Some(c) = tf_map.get_mut(lower) { *c += 1; }
+    else { tf_map.insert(lower.to_string(), 1); }
+    count
+}
+
 /// Extract search terms: tokenize + filter stop words + dedup.
 pub fn query_terms(query: &str) -> Vec<String> {
     let mut terms = Vec::with_capacity(8);

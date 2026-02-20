@@ -93,7 +93,7 @@ pub fn iter_live(log_path: &Path) -> Result<Vec<LogEntry>, String> {
     if data[..4] != LOG_MAGIC { return Err("bad data.log magic".into()); }
 
     let mut entries = Vec::new();
-    let mut deleted = std::collections::HashSet::new();
+    let mut deleted = crate::fxhash::FxHashSet::default();
     let mut pos = LOG_HEADER_SIZE as usize;
 
     while pos < data.len() {

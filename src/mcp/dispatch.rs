@@ -299,7 +299,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             Ok(result)
         }
         "rebuild_index" => {
-            let (result, bytes) = crate::inverted::rebuild(dir)?;
+            let (result, bytes) = crate::inverted::rebuild_and_persist(dir)?;
             super::store_index(bytes);
             Ok(result)
         }

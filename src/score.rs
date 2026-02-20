@@ -46,15 +46,17 @@ pub fn matches_tokens(tf_map: &FxHashMap<String, usize>, terms: &[String], mode:
     }
 }
 
-/// BM25 score on borrowed cache entries. No token_set/tf_map clones.
-/// Only builds lines (String allocations) for entries that score > 0.
+/// BM25 score on borrowed cache entries. Two-phase: score first, extract lines for top-K only.
+/// Phase 1 does zero String allocations. Phase 2 only allocates for `limit` entries.
 fn score_cached_mode(entries: &[&crate::cache::CachedEntry], terms: &[String],
-                     mode: SearchMode, n: f64, avgdl: f64, dfs: &[usize])
+                     mode: SearchMode, n: f64, avgdl: f64, dfs: &[usize],
+                     limit: usize)
     -> Vec<ScoredResult>
 {
-    entries.iter()
-        .filter(|e| matches_tokens(&e.tf_map, terms, mode))
-        .filter_map(|e| {
+    // Phase 1: Score only — zero String allocations
+    let mut scored: Vec<(f64, usize)> = entries.iter().enumerate()
+        .filter(|(_, e)| matches_tokens(&e.tf_map, terms, mode))
+        .filter_map(|(idx, e)| {
             let len_norm = 1.0 - BM25_B + BM25_B * e.word_count as f64 / avgdl.max(1.0);
             let mut score = 0.0;
             for (i, term) in terms.iter().enumerate() {
@@ -65,22 +67,28 @@ fn score_cached_mode(entries: &[&crate::cache::CachedEntry], terms: &[String],
                 score += idf * (tf * (BM25_K1 + 1.0)) / (tf + BM25_K1 * len_norm);
             }
             if score == 0.0 { return None; }
-            // Topics are already lowercase (config::sanitize_topic). Tags are already lowercase.
             debug_assert!(e.topic.chars().all(|c| !c.is_uppercase()));
             if terms.iter().any(|t| e.topic.contains(t.as_str())) { score *= 1.5; }
             if let Some(ref tag_line) = e.tags_raw {
                 let tag_hits = terms.iter().filter(|t| tag_line.contains(t.as_str())).count();
                 if tag_hits > 0 { score *= 1.0 + 0.3 * tag_hits as f64; }
             }
-            let mut lines = vec![format!("## {}", e.date_str())];
-            for line in e.body.lines() { lines.push(line.to_string()); }
-            Some(ScoredResult { name: e.topic.to_string(), lines: Rc::new(lines), score })
+            Some((score, idx))
         })
-        .collect()
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    // Phase 2: Extract lines ONLY for top-K entries
+    scored.truncate(limit);
+    scored.iter().map(|&(score, idx)| {
+        let e = entries[idx];
+        let mut lines = vec![format!("## {}", e.date_str())];
+        for line in e.body.lines() { lines.push(line.to_string()); }
+        ScoredResult { name: e.topic.to_string(), lines: Rc::new(lines), score }
+    }).collect()
 }
 
 /// Score on cache with AND→OR fallback. Borrows token_set/tf_map from cache.
-fn score_on_cache(dir: &Path, terms: &[String], filter: &Filter)
+fn score_on_cache(dir: &Path, terms: &[String], filter: &Filter, limit: Option<usize>)
     -> Result<(Vec<ScoredResult>, bool), String>
 {
     crate::cache::with_corpus(dir, |cached| {
@@ -95,14 +103,12 @@ fn score_on_cache(dir: &Path, terms: &[String], filter: &Filter)
         let avgdl = if filtered.is_empty() { 1.0 } else { total_words as f64 / n };
         let dfs: Vec<usize> = terms.iter()
             .map(|t| filtered.iter().filter(|e| e.tf_map.contains_key(t)).count()).collect();
-        let mut results = score_cached_mode(&filtered, terms, filter.mode, n, avgdl, &dfs);
+        let cap = limit.unwrap_or(filtered.len());
+        let mut results = score_cached_mode(&filtered, terms, filter.mode, n, avgdl, &dfs, cap);
         let mut fallback = false;
         if results.is_empty() && filter.mode == SearchMode::And && terms.len() >= 2 {
-            results = score_cached_mode(&filtered, terms, SearchMode::Or, n, avgdl, &dfs);
+            results = score_cached_mode(&filtered, terms, SearchMode::Or, n, avgdl, &dfs, cap);
             fallback = !results.is_empty();
-        }
-        if !terms.is_empty() {
-            results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         }
         (results, fallback)
     })
@@ -182,7 +188,7 @@ pub fn search_scored(dir: &Path, terms: &[String], filter: &Filter, limit: Optio
     -> Result<(Vec<ScoredResult>, bool), String>
 {
     if terms.is_empty() {
-        return score_on_cache(dir, terms, filter);
+        return score_on_cache(dir, terms, filter, limit);
     }
 
     // Try index path — prefer cached data, fall back to disk read
@@ -207,7 +213,7 @@ pub fn search_scored(dir: &Path, terms: &[String], filter: &Filter, limit: Optio
     }
 
     // Fallback: score on borrowed cache entries (no clone storm)
-    score_on_cache(dir, terms, filter)
+    score_on_cache(dir, terms, filter, limit)
 }
 
 /// Score using binary inverted index with FilterPred for pre-scoring elimination.

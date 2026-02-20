@@ -329,8 +329,18 @@ impl IndexBuilder {
 
 // --- Public functions ---
 
-/// Build index from data.log. Uses corpus cache when available to skip tokenization.
+/// Build index from corpus cache. Returns bytes without writing to disk.
+/// Used by ensure_index_fresh (hot path) — disk write deferred.
 pub fn rebuild(dir: &Path) -> Result<(String, Vec<u8>), String> {
+    rebuild_inner(dir, false)
+}
+
+/// Build index AND write to disk. Used by explicit rebuild_index tool.
+pub fn rebuild_and_persist(dir: &Path) -> Result<(String, Vec<u8>), String> {
+    rebuild_inner(dir, true)
+}
+
+fn rebuild_inner(dir: &Path, persist: bool) -> Result<(String, Vec<u8>), String> {
     let log_path = crate::datalog::ensure_log(dir)?;
     let log_size = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
 
@@ -350,10 +360,9 @@ pub fn rebuild(dir: &Path) -> Result<(String, Vec<u8>), String> {
             let tid = builder.add_topic(&e.topic);
             let source = e.source.as_deref().unwrap_or("").to_string();
             let tags: Vec<String> = e.tags().iter().map(|t| t.to_string()).collect();
-            let snippet = build_snippet(&e.topic, e.timestamp_min, &e.body);
             let conf = if e.confidence < 1.0 { Some(e.confidence) } else { None };
             builder.add_entry_from_tfmap(
-                tid, snippet, e.timestamp_min, source, e.offset, tags,
+                tid, e.snippet.clone(), e.timestamp_min, source, e.offset, tags,
                 &e.tf_map, e.word_count, conf,
             );
         }
@@ -363,8 +372,10 @@ pub fn rebuild(dir: &Path) -> Result<(String, Vec<u8>), String> {
         (builder.build(), ne, nt, ntop)
     })?;
 
-    let index_path = dir.join("index.bin");
-    std::fs::write(&index_path, &bytes).map_err(|e| e.to_string())?;
+    if persist {
+        let index_path = dir.join("index.bin");
+        std::fs::write(&index_path, &bytes).map_err(|e| e.to_string())?;
+    }
     let msg = format!("index v2: {ne} entries, {nt} terms, {ntop} topics, {} bytes",
         bytes.len());
     Ok((msg, bytes))
@@ -389,14 +400,4 @@ fn compute_confidence_cached(
     if file_mtime > entry_time { 178 } else { 255 }
 }
 
-fn build_snippet(topic: &str, ts_min: i32, body: &str) -> String {
-    let date = crate::time::minutes_to_date_str(ts_min);
-    let lines: Vec<&str> = body.lines()
-        .filter(|l| !l.starts_with("[tags:") && !l.starts_with("[source:")
-            && !l.starts_with("[type:") && !l.starts_with("[modified:")
-            && !l.starts_with("[confidence:") && !l.starts_with("[links:")
-            && !l.trim().is_empty())
-        .take(2).collect();
-    format!("[{}] {} {}", topic, date, lines.join(" ").chars().take(120).collect::<String>())
-}
 

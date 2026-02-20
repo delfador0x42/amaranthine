@@ -140,7 +140,7 @@ fn ensure_datalog(dir: &Path) {
             } else { let _ = crate::datalog::ensure_log(dir); }
         } else { let _ = crate::datalog::ensure_log(dir); }
     }
-    match crate::inverted::rebuild(dir) {
+    match crate::inverted::rebuild_and_persist(dir) {
         Ok((_, bytes)) => store_index(bytes),
         Err(_) => {} // no index yet, load_index in run() will try disk
     }
@@ -204,7 +204,7 @@ fn init_result() -> Value {
         ])),
         ("serverInfo".into(), Value::Obj(vec![
             ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("6.2.0".into())),
+            ("version".into(), Value::Str("6.2.1".into())),
         ])),
     ])
 }

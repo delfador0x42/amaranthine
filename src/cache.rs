@@ -19,6 +19,7 @@ pub struct CachedEntry {
     pub source: Option<String>,
     pub confidence: f64, // 0.0-1.0, default 1.0; explicit from [confidence:] metadata
     pub links: Vec<(String, usize)>, // (topic, entry_index) from [links:] metadata
+    pub snippet: String, // precomputed "[topic] date content" for index builder
 }
 
 impl CachedEntry {
@@ -98,10 +99,8 @@ where F: FnOnce(&[CachedEntry]) -> R {
             None => { let t = InternedStr::new(&e.topic); interned.push(t.clone()); t }
         };
         let source = crate::text::extract_source(&e.body);
-        let tokens = crate::text::tokenize(&e.body);
-        let word_count = tokens.len();
-        let mut tf_map: FxHashMap<String, usize> = crate::fxhash::map_with_capacity(word_count / 2);
-        for t in &tokens { *tf_map.entry(t.clone()).or_insert(0) += 1; }
+        let mut tf_map: FxHashMap<String, usize> = crate::fxhash::map_with_capacity(32);
+        let word_count = crate::text::tokenize_into_tfmap(&e.body, &mut tf_map);
         let tags_raw = e.body.lines()
             .find(|l| l.starts_with("[tags: "))
             .map(|l| l.to_string());
@@ -111,12 +110,13 @@ where F: FnOnce(&[CachedEntry]) -> R {
                 .and_then(|s| s.trim().parse::<f64>().ok()))
             .unwrap_or(1.0);
         let links = parse_links(&e.body);
+        let snippet = build_snippet(topic.as_str(), e.timestamp_min, &e.body);
         entries.push(CachedEntry {
             topic,
             body: e.body,
             timestamp_min: e.timestamp_min,
             offset: e.offset,
-            tf_map, word_count, tags_raw, source, confidence, links,
+            tf_map, word_count, tags_raw, source, confidence, links, snippet,
         });
     }
 
@@ -139,10 +139,8 @@ pub fn append_to_cache(dir: &Path, topic: &str, body: &str, ts_min: i32, offset:
         .map(|e| e.topic.clone())
         .unwrap_or_else(|| InternedStr::new(topic));
     let source = crate::text::extract_source(body);
-    let tokens = crate::text::tokenize(body);
-    let word_count = tokens.len();
-    let mut tf_map = crate::fxhash::map_with_capacity(word_count / 2);
-    for t in &tokens { *tf_map.entry(t.clone()).or_insert(0) += 1; }
+    let mut tf_map = crate::fxhash::map_with_capacity(32);
+    let word_count = crate::text::tokenize_into_tfmap(body, &mut tf_map);
     let tags_raw = body.lines().find(|l| l.starts_with("[tags: ")).map(|l| l.to_string());
     let confidence = body.lines()
         .find_map(|l| l.strip_prefix("[confidence: ")
@@ -150,9 +148,10 @@ pub fn append_to_cache(dir: &Path, topic: &str, body: &str, ts_min: i32, offset:
             .and_then(|s| s.trim().parse::<f64>().ok()))
         .unwrap_or(1.0);
     let links = parse_links(body);
+    let snippet = build_snippet(topic, ts_min, body);
     cache.entries.push(CachedEntry {
         topic: topic_interned, body: body.to_string(), timestamp_min: ts_min,
-        offset, tf_map, word_count, tags_raw, source, confidence, links,
+        offset, tf_map, word_count, tags_raw, source, confidence, links, snippet,
     });
     cache.mtime = cur_mtime;
 }
@@ -168,6 +167,18 @@ pub fn stats() -> CacheStats {
         Some(c) => CacheStats { entries: c.entries.len(), cached: true },
         None => CacheStats { entries: 0, cached: false },
     }
+}
+
+/// Build index snippet: "[topic] date content_preview". Computed once, reused by rebuild.
+fn build_snippet(topic: &str, ts_min: i32, body: &str) -> String {
+    let date = crate::time::minutes_to_date_str(ts_min);
+    let lines: Vec<&str> = body.lines()
+        .filter(|l| !l.starts_with("[tags:") && !l.starts_with("[source:")
+            && !l.starts_with("[type:") && !l.starts_with("[modified:")
+            && !l.starts_with("[confidence:") && !l.starts_with("[links:")
+            && !l.trim().is_empty())
+        .take(2).collect();
+    format!("[{}] {} {}", topic, date, crate::text::truncate(&lines.join(" "), 120))
 }
 
 /// Parse `[links: topic:idx topic:idx]` metadata from entry body.
