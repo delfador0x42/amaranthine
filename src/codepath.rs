@@ -45,7 +45,7 @@ pub fn run(pattern: &str, path: &Path, glob_suffix: &str, context: usize)
     format_results(&all_hits, pattern, path, glob_suffix)
 }
 
-fn walk_files(dir: &Path, suffix: &str, out: &mut Vec<PathBuf>) -> Result<(), String> {
+pub fn walk_files(dir: &Path, suffix: &str, out: &mut Vec<PathBuf>) -> Result<(), String> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
     for entry in entries.flatten() {

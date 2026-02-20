@@ -94,6 +94,27 @@ impl IndexBuilder {
         entry_id
     }
 
+    /// Build from cached tf_map — no tokenization, no body scanning.
+    pub fn add_entry_from_tfmap(
+        &mut self, topic_id: u16, snippet: String,
+        date_minutes: i32, source: String, log_offset: u32, tags: Vec<String>,
+        tf_map: &FxHashMap<String, usize>, word_count: usize,
+        explicit_confidence: Option<f64>,
+    ) -> u32 {
+        let entry_id = self.entries.len() as u32;
+        self.total_words += word_count;
+        for (term, &tf) in tf_map {
+            if term.len() < 2 { continue; }
+            self.terms.entry(term.clone()).or_default().push((entry_id, tf.min(u16::MAX as usize) as u16));
+        }
+        for tag in &tags { *self.tag_freq.entry(tag.clone()).or_insert(0) += 1; }
+        self.entries.push(EntryInfo {
+            topic_id, word_count: word_count.min(u16::MAX as usize) as u16,
+            snippet, date_minutes, source, log_offset, tags, explicit_confidence,
+        });
+        entry_id
+    }
+
     /// F11: Xref detection via term index — O(topics × avg_posting) instead of O(entries × topics).
     fn compute_xrefs(&self) -> Vec<XrefEdge> {
         let mut edges: FxHashMap<(u16, u16), u16> = FxHashMap::default();
@@ -327,13 +348,13 @@ pub fn rebuild(dir: &Path) -> Result<(String, Vec<u8>), String> {
         let mut builder = IndexBuilder::new();
         for e in cached {
             let tid = builder.add_topic(&e.topic);
-            let source = crate::text::extract_source(&e.body).unwrap_or_default();
-            let tags = extract_entry_tags(&e.body);
+            let source = e.source.as_deref().unwrap_or("").to_string();
+            let tags: Vec<String> = e.tags().iter().map(|t| t.to_string()).collect();
             let snippet = build_snippet(&e.topic, e.timestamp_min, &e.body);
             let conf = if e.confidence < 1.0 { Some(e.confidence) } else { None };
-            builder.add_entry_with_tokens(
+            builder.add_entry_from_tfmap(
                 tid, snippet, e.timestamp_min, source, e.offset, tags,
-                &e.tokens, conf,
+                &e.tf_map, e.word_count, conf,
             );
         }
         let ne = builder.entries.len();
@@ -347,16 +368,6 @@ pub fn rebuild(dir: &Path) -> Result<(String, Vec<u8>), String> {
     let msg = format!("index v2: {ne} entries, {nt} terms, {ntop} topics, {} bytes",
         bytes.len());
     Ok((msg, bytes))
-}
-
-fn extract_entry_tags(body: &str) -> Vec<String> {
-    body.lines()
-        .find_map(|l| {
-            let tags = crate::text::parse_tags_raw(Some(l));
-            if tags.is_empty() { None }
-            else { Some(tags.iter().map(|t| t.to_lowercase()).collect()) }
-        })
-        .unwrap_or_default()
 }
 
 /// F6: Cached variant — one stat() per unique source path instead of per entry.

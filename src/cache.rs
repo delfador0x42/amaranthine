@@ -13,10 +13,10 @@ pub struct CachedEntry {
     pub body: String,
     pub timestamp_min: i32,
     pub offset: u32,
-    pub tokens: Vec<String>,
     pub tf_map: FxHashMap<String, usize>,
     pub word_count: usize,
     pub tags_raw: Option<String>,
+    pub source: Option<String>,
     pub confidence: f64, // 0.0-1.0, default 1.0; explicit from [confidence:] metadata
     pub links: Vec<(String, usize)>, // (topic, entry_index) from [links:] metadata
 }
@@ -92,14 +92,14 @@ where F: FnOnce(&[CachedEntry]) -> R {
     let mut entries = Vec::with_capacity(raw_entries.len());
     // Intern topic names: ~45 unique across ~1000 entries → 955 fewer heap allocs
     let mut interned: Vec<InternedStr> = Vec::with_capacity(64);
-    for e in &raw_entries {
+    for e in raw_entries {
         let topic = match interned.iter().find(|t| t.as_str() == e.topic.as_str()) {
             Some(t) => t.clone(),
             None => { let t = InternedStr::new(&e.topic); interned.push(t.clone()); t }
         };
+        let source = crate::text::extract_source(&e.body);
         let tokens = crate::text::tokenize(&e.body);
         let word_count = tokens.len();
-        // Single-pass: build tf_map from tokens (one clone per unique token)
         let mut tf_map: FxHashMap<String, usize> = crate::fxhash::map_with_capacity(word_count / 2);
         for t in &tokens { *tf_map.entry(t.clone()).or_insert(0) += 1; }
         let tags_raw = e.body.lines()
@@ -113,16 +113,48 @@ where F: FnOnce(&[CachedEntry]) -> R {
         let links = parse_links(&e.body);
         entries.push(CachedEntry {
             topic,
-            body: e.body.clone(),
+            body: e.body,
             timestamp_min: e.timestamp_min,
             offset: e.offset,
-            tokens, tf_map, word_count, tags_raw, confidence, links,
+            tf_map, word_count, tags_raw, source, confidence, links,
         });
     }
 
     let result = f(&entries);
     *guard = Some(CachedCorpus { mtime: cur_mtime, entries });
     Ok(result)
+}
+
+/// Append a new entry to the in-memory cache and update mtime.
+/// Avoids cache invalidation after store (eliminates double corpus load).
+/// No-op if cache is empty (cold start — next read will do full load).
+pub fn append_to_cache(dir: &Path, topic: &str, body: &str, ts_min: i32, offset: u32) {
+    let log_path = crate::config::log_path(dir);
+    let cur_mtime = std::fs::metadata(&log_path)
+        .and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut guard = match CACHE.lock() { Ok(g) => g, Err(_) => return };
+    let cache = match guard.as_mut() { Some(c) => c, None => return };
+    let topic_interned = cache.entries.iter()
+        .find(|e| e.topic.as_str() == topic)
+        .map(|e| e.topic.clone())
+        .unwrap_or_else(|| InternedStr::new(topic));
+    let source = crate::text::extract_source(body);
+    let tokens = crate::text::tokenize(body);
+    let word_count = tokens.len();
+    let mut tf_map = crate::fxhash::map_with_capacity(word_count / 2);
+    for t in &tokens { *tf_map.entry(t.clone()).or_insert(0) += 1; }
+    let tags_raw = body.lines().find(|l| l.starts_with("[tags: ")).map(|l| l.to_string());
+    let confidence = body.lines()
+        .find_map(|l| l.strip_prefix("[confidence: ")
+            .and_then(|s| s.strip_suffix(']'))
+            .and_then(|s| s.trim().parse::<f64>().ok()))
+        .unwrap_or(1.0);
+    let links = parse_links(body);
+    cache.entries.push(CachedEntry {
+        topic: topic_interned, body: body.to_string(), timestamp_min: ts_min,
+        offset, tf_map, word_count, tags_raw, source, confidence, links,
+    });
+    cache.mtime = cur_mtime;
 }
 
 pub struct CacheStats {

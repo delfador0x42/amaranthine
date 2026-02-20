@@ -55,7 +55,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             let mut ok_count = 0;
             let mut results = Vec::new();
             let mut seen: Vec<(String, String)> = Vec::new();
-            let mut batch_tokens: Vec<(String, std::collections::HashSet<String>)> = Vec::new();
+            let mut batch_tokens: Vec<(String, crate::fxhash::FxHashSet<String>)> = Vec::new();
             'batch: for (i, item) in items.iter().enumerate() {
                 let topic = item.get("topic").and_then(|v| v.as_str()).unwrap_or("");
                 let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
@@ -75,7 +75,7 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
                 }
                 seen.push(key);
                 // Token-based semantic dupe check within batch
-                let new_tokens: std::collections::HashSet<String> = crate::text::tokenize(text)
+                let new_tokens: crate::fxhash::FxHashSet<String> = crate::text::tokenize(text)
                     .into_iter().filter(|t| t.len() >= 3).collect();
                 if new_tokens.len() >= 6 {
                     let mut is_dupe = false;
@@ -358,6 +358,25 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
         "compact_log" => {
             let result = crate::datalog::compact_log(dir)?;
             super::after_write(dir, "");
+            Ok(result)
+        }
+        "callgraph" => {
+            let pattern = arg_str(args, "pattern");
+            let path_str = arg_str(args, "path");
+            let glob = arg_str(args, "glob");
+            let glob = if glob.is_empty() { "*.rs" } else { glob.as_str() };
+            let depth = arg_str(args, "depth").parse::<usize>().unwrap_or(2);
+            let direction = arg_str(args, "direction");
+            let direction = if direction.is_empty() { "both" } else { direction.as_str() };
+            let result = crate::callgraph::run(&pattern, std::path::Path::new(&path_str), glob, depth, direction)?;
+            let store_topic = arg_str(args, "store_topic");
+            if !store_topic.is_empty() {
+                let tags = arg_str(args, "tags");
+                let tags = if tags.is_empty() { "structural,callgraph,raw-data" } else { tags.as_str() };
+                let source = format!("{}/**/{}", path_str, glob);
+                crate::store::run_full(dir, &store_topic, &result, Some(tags), true, Some(&source))?;
+                super::after_write(dir, &store_topic);
+            }
             Ok(result)
         }
         "codepath" => {

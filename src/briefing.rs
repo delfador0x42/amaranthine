@@ -101,8 +101,9 @@ fn write_categories(out: &mut String, entries: &[Compressed]) -> FxHashSet<usize
         if group.is_empty() { continue; }
         for &(i, _) in &group { used.insert(i); }
         let _ = writeln!(out, "--- {} ({}) ---", cat, group.len());
-        // Top 5 in full, next 10 as one-liners, rest summarized
-        for (_, e) in group.iter().take(5) { format_entry(out, e); }
+        // Top 5 in full (DATA FLOW gets 10 body lines), next 10 as one-liners, rest summarized
+        let body_limit = if cat == "DATA FLOW" { 10 } else { 5 };
+        for (_, e) in group.iter().take(5) { format_entry_n(out, e, body_limit); }
         let rest = group.len().saturating_sub(5);
         let oneliners = rest.min(10);
         for (_, e) in group.iter().skip(5).take(oneliners) { format_oneliner(out, e); }
@@ -182,7 +183,7 @@ fn write_stats(out: &mut String, entries: &[Compressed], raw_count: usize) {
         entries.len(), tagged, sourced, chained, raw_count, entries.len(), pct);
 }
 
-fn format_entry(out: &mut String, e: &Compressed) {
+fn format_entry_n(out: &mut String, e: &Compressed, max_lines: usize) {
     let src = e.source.as_deref().map(|s| format!(" → {s}")).unwrap_or_default();
     let also = format_also(&e.also_in);
     let chain_note = e.chain.as_deref().map(|_| " (chained)").unwrap_or("");
@@ -197,8 +198,10 @@ fn format_entry(out: &mut String, e: &Compressed) {
             && !l.starts_with("[tier:") && !l.starts_with("[confidence:")
             && !l.starts_with("[links:"))
         .collect();
-    for l in lines.iter().take(5) { let _ = writeln!(out, "  {}", l.trim()); }
-    if lines.len() > 5 { let _ = writeln!(out, "  ...({} more lines)", lines.len() - 5); }
+    for l in lines.iter().take(max_lines) { let _ = writeln!(out, "  {}", l.trim()); }
+    if lines.len() > max_lines {
+        let _ = writeln!(out, "  ...({} more lines)", lines.len() - max_lines);
+    }
     let _ = writeln!(out);
 }
 

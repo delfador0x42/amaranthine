@@ -45,7 +45,8 @@ pub fn run_full_ext(
     let dupe_warn = if !force { check_dupe(dir, topic, &text) } else { None };
     let topic_hint = suggest_topic(dir, topic);
 
-    crate::datalog::append_entry(&log_path, topic, &body, ts_min)?;
+    let offset = crate::datalog::append_entry(&log_path, topic, &body, ts_min)?;
+    crate::cache::append_to_cache(dir, topic, &body, ts_min, offset);
 
     let echo = text.lines().map(|l| format!("  > {l}")).collect::<Vec<_>>().join("\n");
     let tag_echo = cleaned_tags.as_deref().filter(|t| !t.is_empty())
@@ -168,7 +169,7 @@ fn singularize(s: &str) -> String {
 fn check_dupe(dir: &Path, topic: &str, new_text: &str) -> Option<String> {
     crate::cache::with_corpus(dir, |cached| {
         // F7: Use cached tf_map for Jaccard similarity instead of body.to_lowercase
-        let new_tokens: std::collections::HashSet<String> = crate::text::tokenize(new_text)
+        let new_tokens: crate::fxhash::FxHashSet<String> = crate::text::tokenize(new_text)
             .into_iter().filter(|t| t.len() >= 3).collect();
         if new_tokens.len() < 6 { return None; }
         for e in cached.iter().filter(|e| e.topic == topic) {
