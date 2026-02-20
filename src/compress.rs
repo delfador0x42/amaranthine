@@ -2,6 +2,7 @@
 //! source pointer extraction. Turns raw entries into dense compressed facts.
 
 use std::collections::BTreeMap;
+use crate::fxhash::FxHashSet;
 
 /// Input: one matching entry collected by the orchestrator.
 pub struct RawEntry {
@@ -43,8 +44,13 @@ pub fn compress(entries: Vec<RawEntry>) -> Vec<Compressed> {
         }
     }).collect();
     dedup(&mut out);
-    supersede(&mut out);
-    temporal_chains(&mut out);
+    // Tokenize first_content once, reuse across supersede + temporal_chains
+    let tokens: Vec<FxHashSet<String>> = out.iter().map(|e| {
+        first_content(&e.body).split_whitespace()
+            .filter(|w| w.len() >= 3).map(|w| w.to_lowercase()).collect()
+    }).collect();
+    supersede(&mut out, &tokens);
+    temporal_chains(&mut out, &tokens);
     out.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap_or(std::cmp::Ordering::Equal));
     out
 }
@@ -88,6 +94,7 @@ fn dedup(entries: &mut Vec<Compressed>) {
 }
 
 /// Supersession: same topic, >60% first_content overlap, >1 day apart → dim older.
+/// Now visible: chain text identifies the superseding entry.
 fn supersede(entries: &mut [Compressed]) {
     let tokens: Vec<Vec<String>> = entries.iter().map(|e| {
         first_content(&e.body).split_whitespace()
@@ -97,29 +104,30 @@ fn supersede(entries: &mut [Compressed]) {
     for (i, e) in entries.iter().enumerate() {
         by_topic.entry(e.topic.as_str()).or_default().push(i);
     }
-    let mut dimmed: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    // Track: dimmed_idx → newer_idx (the entry that supersedes it)
+    let mut superseded_by: BTreeMap<usize, usize> = BTreeMap::new();
     for (_, indices) in &by_topic {
         for (a, &i) in indices.iter().enumerate() {
-            if tokens[i].len() < 3 || dimmed.contains(&i) { continue; }
+            if tokens[i].len() < 3 || superseded_by.contains_key(&i) { continue; }
             for &j in &indices[a+1..] {
-                if tokens[j].len() < 3 || dimmed.contains(&j) { continue; }
+                if tokens[j].len() < 3 || superseded_by.contains_key(&j) { continue; }
                 let isect = tokens[i].iter().filter(|t| tokens[j].contains(t)).count();
                 let union = tokens[i].len() + tokens[j].len() - isect;
                 if union == 0 || isect * 100 / union < 60 { continue; }
                 if (entries[i].days_old - entries[j].days_old).abs() < 2 { continue; }
                 if entries[i].days_old > entries[j].days_old {
-                    dimmed.insert(i);
+                    superseded_by.insert(i, j);
                 } else {
-                    dimmed.insert(j);
+                    superseded_by.insert(j, i);
                 }
             }
         }
     }
-    for &i in &dimmed {
-        entries[i].relevance *= 0.5;
-        if entries[i].chain.is_none() {
-            entries[i].chain = Some("superseded".to_string());
-        }
+    for (&dimmed, &newer) in &superseded_by {
+        entries[dimmed].relevance *= 0.5;
+        let newer_fc = first_content(&entries[newer].body);
+        let preview = crate::text::truncate(newer_fc, 50);
+        entries[dimmed].chain = Some(format!("superseded by: {}", preview));
     }
 }
 

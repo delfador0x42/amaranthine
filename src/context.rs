@@ -17,7 +17,7 @@ fn run_inner(dir: &Path, query: Option<&str>, plain: bool, brief: bool) -> Resul
 
     // Query provided → delegate to reconstruct for one-shot briefing
     if let Some(q) = query {
-        return crate::reconstruct::run(dir, q);
+        return crate::reconstruct::run(dir, q, "summary", None);
     }
 
     // Synthesized meta-briefing for cold starts

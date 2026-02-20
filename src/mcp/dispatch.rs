@@ -242,6 +242,12 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             crate::prune::run(dir, days, true)
         }
         "compact" => {
+            let log = arg_bool(args, "log");
+            if log {
+                let result = crate::datalog::compact_log(dir)?;
+                super::after_write(dir, "");
+                return Ok(result);
+            }
             let topic = arg_ref(args, "topic");
             let apply = arg_ref(args, "apply") == "true";
             let result = if topic.is_empty() {
@@ -359,7 +365,11 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
         }
         "reconstruct" => {
             let query = arg_ref(args, "query");
-            crate::reconstruct::run(dir, query)
+            let detail = arg_ref(args, "detail");
+            let detail = if detail.is_empty() { "summary" } else { detail };
+            let since_str = arg_str(args, "since");
+            let since_hours = since_str.parse::<u64>().ok();
+            crate::reconstruct::run(dir, query, detail, since_hours)
         }
         "compact_log" => {
             let result = crate::datalog::compact_log(dir)?;
@@ -403,7 +413,14 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             Ok(result)
         }
         "dep_graph" => crate::depgraph::run(dir),
-        "check_stale" => crate::stats::check_stale(dir),
+        "check_stale" => {
+            let refresh = arg_bool(args, "refresh");
+            if refresh {
+                crate::stats::refresh_stale(dir)
+            } else {
+                crate::stats::check_stale(dir)
+            }
+        }
         "refresh_stale" => crate::stats::refresh_stale(dir),
         _ => Err(format!("unknown tool: {name}")),
     }
