@@ -59,7 +59,15 @@ pub fn run(dir: &Path) -> Result<(), String> {
         let id = msg.get("id");
 
         let resp: Option<String> = match method {
-            "initialize" => Some(rpc_ok_value(id, init_result())),
+            "initialize" => {
+                let id_json = id_to_json(id);
+                let mut out = stdout.lock();
+                let _ = write!(out,
+                    r#"{{"jsonrpc":"2.0","id":{id_json},"result":{INIT_RESULT}}}"#);
+                let _ = writeln!(out);
+                let _ = out.flush();
+                continue;
+            }
             "notifications/initialized" | "initialized" => None,
             "tools/list" => {
                 // Fast path: pre-serialized tool list (cached, Arc avoids clone)
@@ -273,12 +281,12 @@ pub(crate) fn after_write(_dir: &Path, _topic: &str) {
     }
 }
 
-/// Rebuild index if dirty and debounce window (100ms) has elapsed.
+/// Rebuild index if dirty and debounce window (50ms) has elapsed.
 /// Burst writes within the window are coalesced into a single rebuild.
-/// F1: Uses returned bytes directly instead of re-reading from disk.
+/// Persists index.bin to disk (atomic rename) so hook mmap always reads fresh data.
 pub(crate) fn ensure_index_fresh(dir: &Path) {
     if !INDEX_DIRTY.load(Ordering::Acquire) { return; }
-    // Debounce: skip rebuild if dirty flag was set less than 100ms ago
+    // Debounce: skip rebuild if dirty flag was set less than 50ms ago
     let elapsed = DIRTY_AT.lock().ok()
         .and_then(|g| g.map(|t| t.elapsed()));
     if let Some(dt) = elapsed {
@@ -289,29 +297,19 @@ pub(crate) fn ensure_index_fresh(dir: &Path) {
     if INDEX_DIRTY.compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
         if let Ok(mut guard) = DIRTY_AT.lock() { *guard = None; }
         match crate::inverted::rebuild(dir) {
-            Ok((_, bytes)) => store_index(bytes),
+            Ok((_, bytes)) => {
+                // Persist to disk so hook mmap reads fresh data.
+                // Atomic: write tmp, rename over target.
+                let tmp = dir.join("index.bin.tmp");
+                let target = dir.join("index.bin");
+                let _ = std::fs::write(&tmp, &bytes)
+                    .and_then(|_| std::fs::rename(&tmp, &target));
+                store_index(bytes);
+            }
             Err(_) => load_index(dir),
         }
     }
 }
 
-/// Initialize result — only called once per session, Value tree is fine here.
-fn init_result() -> Value {
-    Value::Obj(vec![
-        ("protocolVersion".into(), Value::Str("2024-11-05".into())),
-        ("capabilities".into(), Value::Obj(vec![
-            ("tools".into(), Value::Obj(Vec::new())),
-        ])),
-        ("serverInfo".into(), Value::Obj(vec![
-            ("name".into(), Value::Str("amaranthine".into())),
-            ("version".into(), Value::Str("6.4.0".into())),
-        ])),
-    ])
-}
-
-/// Build JSON-RPC OK response wrapping a Value (only for initialize).
-fn rpc_ok_value(id: Option<&Value>, result: Value) -> String {
-    let id_json = id_to_json(id);
-    let result_json = result.to_string();
-    format!(r#"{{"jsonrpc":"2.0","id":{id_json},"result":{result_json}}}"#)
-}
+/// Pre-serialized initialize result — zero allocation, written directly to stdout.
+const INIT_RESULT: &str = r#"{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"amaranthine","version":"6.5.0"}}"#;

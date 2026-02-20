@@ -26,6 +26,30 @@ pub fn run(hook_type: &str, dir: &Path) -> Result<String, String> {
     }
 }
 
+/// Memory-map index.bin for zero-copy queries — no socket overhead, no full file read.
+/// Uses mmap(2) directly — zero external dependencies.
+/// Returns None if file doesn't exist or is too small.
+/// Mapping lives until process exit (no munmap needed for short-lived hook processes).
+fn mmap_index(dir: &Path) -> Option<&'static [u8]> {
+    let path = dir.join("index.bin");
+    let f = std::fs::File::open(&path).ok()?;
+    let len = f.metadata().ok()?.len() as usize;
+    if len < std::mem::size_of::<crate::format::Header>() { return None; }
+
+    use std::os::unix::io::AsRawFd;
+    let fd = f.as_raw_fd();
+
+    extern "C" {
+        fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    }
+
+    let ptr = unsafe { mmap(std::ptr::null_mut(), len, 1 /* PROT_READ */, 2 /* MAP_PRIVATE */, fd, 0) };
+    drop(f); // close fd — mapping persists
+
+    if ptr.is_null() || ptr as usize == usize::MAX { return None; } // MAP_FAILED
+    Some(unsafe { std::slice::from_raw_parts(ptr, len) })
+}
+
 /// Build hook JSON output with direct string formatting — zero Value allocations.
 /// JSON-escapes the context string inline via json::escape_into.
 fn hook_output(context: &str) -> String {
@@ -38,6 +62,7 @@ fn hook_output(context: &str) -> String {
 
 /// PreToolUse: inject amaranthine entries relevant to the file being accessed.
 /// Uses fast-path byte scanning to extract tool_name and file_path without full JSON parse.
+/// v6.5: mmap index.bin directly — eliminates socket round-trip (~150-300μs saved per hook).
 fn ambient(input: &str, dir: &Path) -> Result<String, String> {
     if input.is_empty() { return Ok(String::new()); }
 
@@ -68,18 +93,13 @@ fn ambient(input: &str, dir: &Path) -> Result<String, String> {
         }
     } else { vec![] };
 
-    // Fast path: query MCP server via Unix socket (in-memory index)
-    if let Some(result) = sock_ambient(dir, stem, &syms) {
-        if result.is_empty() { return Ok(String::new()); }
-        return Ok(hook_output(&result));
-    }
-
-    // Fallback: read index.bin from disk
-    let data = match std::fs::read(dir.join("index.bin")) {
-        Ok(d) => d,
-        Err(_) => return Ok(String::new()),
+    // Fast path: mmap index.bin — zero-copy, no socket overhead, no full file read.
+    // MCP server persists index.bin on every hot rebuild (atomic rename).
+    let data = match mmap_index(dir) {
+        Some(d) => d,
+        None => return Ok(String::new()),
     };
-    let out = query_ambient(&data, stem, &syms);
+    let out = query_ambient(data, stem, &syms);
     if out.is_empty() { return Ok(String::new()); }
     Ok(hook_output(&out))
 }
@@ -156,21 +176,24 @@ fn stop() -> Result<String, String> {
 }
 
 /// SubagentStart: inject dynamic topic list from index.
+/// v6.5: prefer mmap over socket — eliminates connect overhead.
 fn subagent_start(dir: &Path) -> Result<String, String> {
     let fallback = "AMARANTHINE KNOWLEDGE STORE: You have access to amaranthine MCP tools. \
          Search before starting work.";
 
-    // Fast path: query MCP server via socket
-    let topic_list = crate::sock::query(dir, r#"{"op":"topics"}"#)
-        .or_else(|| {
-            // Fallback: read index.bin from disk
-            let data = std::fs::read(dir.join("index.bin")).ok()?;
-            let topics = crate::binquery::topic_table(&data).ok()?;
+    // Fast path: mmap index.bin directly
+    let topic_list = mmap_index(dir)
+        .and_then(|data| {
+            let topics = crate::binquery::topic_table(data).ok()?;
             let mut list: Vec<String> = topics.iter()
                 .map(|(_, name, count)| format!("{name} ({count})"))
                 .collect();
             list.sort();
             Some(list.join(", "))
+        })
+        .or_else(|| {
+            // Fallback: socket query to running MCP server
+            crate::sock::query(dir, r#"{"op":"topics"}"#)
         });
 
     let msg = match topic_list {
@@ -181,16 +204,6 @@ fn subagent_start(dir: &Path) -> Result<String, String> {
         _ => fallback.into(),
     };
     Ok(hook_output(&msg))
-}
-
-/// Try ambient query via Unix socket (MCP server's in-memory index).
-fn sock_ambient(dir: &Path, stem: &str, syms: &[String]) -> Option<String> {
-    let syms_json: Vec<String> = syms.iter().map(|s| format!("\"{s}\"")).collect();
-    let req = format!(
-        r#"{{"op":"ambient","stem":"{stem}","syms":[{syms}]}}"#,
-        syms = syms_json.join(",")
-    );
-    crate::sock::query(dir, &req)
 }
 
 /// Extract symbols removed by an Edit (for refactor impact detection).
@@ -216,16 +229,28 @@ fn extract_removed_syms(input: &crate::json::Value, stem: &str) -> Vec<String> {
     removed
 }
 
-/// Run ambient queries against index data (disk fallback path).
+/// Run ambient queries against index data (mmap or disk).
 /// Zero format!() calls — all output built with push_str.
+/// v6.5: stack-allocated structural query — zero heap alloc for query string.
 fn query_ambient(data: &[u8], stem: &str, syms: &[String]) -> String {
     let results = crate::binquery::search(data, stem, 5).unwrap_or_default();
     let has_results = !results.is_empty() && !results.starts_with("0 match");
 
-    let mut sq = String::with_capacity(12 + stem.len());
-    sq.push_str("structural ");
-    sq.push_str(stem);
-    let structural = crate::binquery::search(data, &sq, 3).unwrap_or_default();
+    // Stack-allocated query string for structural search (matches sock.rs optimization)
+    let mut sq_buf = [0u8; 128];
+    let sq_prefix = b"structural ";
+    let sq_len = sq_prefix.len() + stem.len();
+    let structural = if sq_len <= sq_buf.len() {
+        sq_buf[..sq_prefix.len()].copy_from_slice(sq_prefix);
+        sq_buf[sq_prefix.len()..sq_len].copy_from_slice(stem.as_bytes());
+        let sq = unsafe { std::str::from_utf8_unchecked(&sq_buf[..sq_len]) };
+        crate::binquery::search(data, sq, 3).unwrap_or_default()
+    } else {
+        let mut sq = String::with_capacity(sq_len);
+        sq.push_str("structural ");
+        sq.push_str(stem);
+        crate::binquery::search(data, &sq, 3).unwrap_or_default()
+    };
     let has_structural = !structural.is_empty() && !structural.starts_with("0 match");
 
     let mut refactor = String::new();

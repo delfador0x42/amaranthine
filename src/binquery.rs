@@ -113,8 +113,9 @@ pub fn search_v2_or(
     search_v2_core(data, query, filter, limit, false)
 }
 
-/// Min-heap entry for top-K selection. O(n log k) vs O(n × k) insertion sort.
-struct HeapHit { score: f64, hit: SearchHit }
+/// Lightweight heap entry for top-K selection — no snippet String allocation.
+/// v6.5: snippets extracted only for final K entries (deferred allocation).
+struct HeapHit { score: f64, entry_id: u32, topic_id: u16, date_minutes: i32, log_offset: u32 }
 impl PartialEq for HeapHit {
     fn eq(&self, other: &Self) -> bool { self.score.to_bits() == other.score.to_bits() }
 }
@@ -157,6 +158,7 @@ fn search_v2_core(
     let gen = state_guard.advance();
     let state = &mut *state_guard;
 
+    // Phase 1: BM25 scoring — accumulate scores in QueryState arrays
     let mut any_hit = false;
     for term in &terms {
         let h = hash_term(term);
@@ -175,27 +177,20 @@ fn search_v2_core(
                     if eid >= num_entries { continue; }
                     let m = read_at::<EntryMeta>(data, meta_off + eid * std::mem::size_of::<EntryMeta>())?;
 
-                    // Pre-scoring filter (2-3ns integer checks)
                     if !filter.passes(&m) { continue; }
 
-                    // Generation counter: reset on first visit
                     if state.entry_gen[eid] != gen {
                         state.scores[eid] = 0.0;
                         state.hit_count[eid] = 0;
                         state.entry_gen[eid] = gen;
                     }
 
-                    // BM25 scoring
                     let doc_len = { m.word_count } as f64;
                     let idf = { p.idf_x1000 } as f64 / 1000.0;
                     let tf = { p.tf } as f64;
                     let len_norm = 1.0 - 0.75 + 0.75 * doc_len / avgdl.max(1.0);
                     let tf_sat = (tf * 2.2) / (tf + 1.2 * len_norm);
-
-                    // Confidence multiplier (255=1.0, 178=0.7)
                     let conf = { m.confidence } as f64 / 255.0;
-
-                    // Recency decay: 1.0 / (1.0 + days_ago / 30.0)
                     let ed = { m.epoch_days };
                     let recency = if ed == 0 { 1.0 } else {
                         1.0 / (1.0 + today_days.saturating_sub(ed) as f64 / 30.0)
@@ -213,7 +208,7 @@ fn search_v2_core(
 
     if !any_hit { return Ok(Vec::new()); }
 
-    // Collect results: min-heap top-K with diversity cap — O(n log k)
+    // Phase 2: Top-K selection — lightweight HeapHit, NO snippet allocation
     use std::collections::BinaryHeap;
     use std::cmp::Reverse;
     let mut heap: BinaryHeap<Reverse<HeapHit>> = BinaryHeap::with_capacity(limit + 1);
@@ -231,40 +226,43 @@ fn search_v2_core(
         let m = read_at::<EntryMeta>(data, meta_off + eid * std::mem::size_of::<EntryMeta>())?;
         let tid = { m.topic_id } as usize;
 
-        // Diversity cap: if topic already has `cap` results and heap full, require 1.5x min score
         if heap.len() >= limit && tid < topic_counts.len() && topic_counts[tid] >= diversity_cap {
             let min_score = heap.peek().map(|r| r.0.score).unwrap_or(0.0);
             if score <= min_score * 1.5 { continue; }
         }
 
-        // Build snippet
-        let s_off = snip_off + { m.snippet_off } as usize;
-        let s_len = { m.snippet_len } as usize;
-        let snippet = if s_off + s_len <= data.len() {
-            std::str::from_utf8(&data[s_off..s_off + s_len]).unwrap_or("").to_string()
-        } else { String::new() };
-
-        let hit = SearchHit {
-            entry_id: eid as u32, topic_id: { m.topic_id }, score,
-            snippet, date_minutes: { m.date_minutes },
-            log_offset: { m.log_offset },
+        let hit = HeapHit {
+            score, entry_id: eid as u32, topic_id: { m.topic_id },
+            date_minutes: { m.date_minutes }, log_offset: { m.log_offset },
         };
 
-        // Min-heap top-K: push or replace min
         if heap.len() < limit {
-            heap.push(Reverse(HeapHit { score, hit }));
+            heap.push(Reverse(hit));
             if tid < topic_counts.len() { topic_counts[tid] = topic_counts[tid].saturating_add(1); }
         } else if score > heap.peek().map(|r| r.0.score).unwrap_or(0.0) {
             let evicted = heap.pop().unwrap().0;
-            let etid = evicted.hit.topic_id as usize;
+            let etid = evicted.topic_id as usize;
             if etid < topic_counts.len() { topic_counts[etid] = topic_counts[etid].saturating_sub(1); }
-            heap.push(Reverse(HeapHit { score, hit }));
+            heap.push(Reverse(hit));
             if tid < topic_counts.len() { topic_counts[tid] = topic_counts[tid].saturating_add(1); }
         }
     }
-    // Drain heap → sorted descending by score
-    let mut results: Vec<SearchHit> = heap.into_vec()
-        .into_iter().map(|r| r.0.hit).collect();
+
+    // Phase 3: Extract snippets ONLY for final K entries — deferred allocation
+    let mut results: Vec<SearchHit> = Vec::with_capacity(heap.len());
+    for r in heap.into_vec() {
+        let h = r.0;
+        let m = read_at::<EntryMeta>(data, meta_off + h.entry_id as usize * std::mem::size_of::<EntryMeta>())?;
+        let so = snip_off + { m.snippet_off } as usize;
+        let sl = { m.snippet_len } as usize;
+        let snippet = if so + sl <= data_len {
+            std::str::from_utf8(&data[so..so + sl]).unwrap_or("").to_string()
+        } else { String::new() };
+        results.push(SearchHit {
+            entry_id: h.entry_id, topic_id: h.topic_id, score: h.score,
+            snippet, date_minutes: h.date_minutes, log_offset: h.log_offset,
+        });
+    }
     results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     Ok(results)
 }
