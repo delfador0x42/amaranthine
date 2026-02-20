@@ -157,6 +157,14 @@ fn temporal_chains(entries: &mut Vec<Compressed>, tokens: &[FxHashSet<String>]) 
         entries[newest].relevance += sorted.len() as f64;
         for &idx in sorted.iter().take(sorted.len() - 1) { remove.push(idx); }
     }
+    // Early exit: if >60% of entries are already chained, skip remaining passes
+    let chained_pct = if entries.is_empty() { 0 } else { remove.len() * 100 / entries.len() };
+    if chained_pct > 60 {
+        remove.sort_unstable();
+        remove.dedup();
+        for &idx in remove.iter().rev() { entries.remove(idx); }
+        return;
+    }
     // Pass 2: date-proximity fallback — group unchained same-topic entries
     // within 48-hour buckets. Only chains groups of 3+ (avoids trivial pairs).
     let chained: std::collections::BTreeSet<usize> = remove.iter().copied()
@@ -173,13 +181,15 @@ fn temporal_chains(entries: &mut Vec<Compressed>, tokens: &[FxHashSet<String>]) 
         if indices.len() < 3 { continue; }
         let mut sorted: Vec<usize> = indices.clone();
         sorted.sort_by(|a, b| entries[*b].days_old.cmp(&entries[*a].days_old));
-        let previews: Vec<String> = sorted.iter().take(4).map(|&i| {
-            let fc = first_content(&entries[i].body);
-            crate::text::truncate(fc, 25).to_string()
-        }).collect();
+        let mut labels: Vec<String> = Vec::new();
+        let mut seen = FxHashSet::default();
+        for &i in sorted.iter().take(4) {
+            let lbl = label_words(first_content(&entries[i].body), 3);
+            if !lbl.is_empty() && seen.insert(lbl.clone()) { labels.push(lbl); }
+        }
         let date = &entries[sorted[0]].date;
         let date_short = if date.len() >= 10 { &date[..10] } else { date };
-        let chain = format!("batch {}: {}", date_short, previews.join(" | "));
+        let chain = format!("batch {}: {}", date_short, labels.join(" | "));
         let newest = *sorted.last().unwrap();
         entries[newest].chain = Some(chain);
         entries[newest].relevance += sorted.len() as f64;
@@ -199,8 +209,10 @@ fn temporal_chains(entries: &mut Vec<Compressed>, tokens: &[FxHashSet<String>]) 
         let mut all_groups = Vec::new();
         for (_, indices) in &topic_unchained {
             if indices.len() < 2 { continue; }
+            // Cap pairwise comparisons to avoid O(N²) on large topic groups
+            let capped = if indices.len() > 50 { &indices[..50] } else { &indices[..] };
             let mut sim: Vec<Vec<usize>> = Vec::new();
-            for &i in indices {
+            for &i in capped {
                 let mut found = false;
                 for g in &mut sim {
                     let j = g[0];
@@ -218,10 +230,13 @@ fn temporal_chains(entries: &mut Vec<Compressed>, tokens: &[FxHashSet<String>]) 
     };
     for mut g in sim_groups {
         g.sort_by(|a, b| entries[*b].days_old.cmp(&entries[*a].days_old));
-        let previews: Vec<String> = g.iter().take(3).map(|&i| {
-            crate::text::truncate(first_content(&entries[i].body), 30).to_string()
-        }).collect();
-        let chain = format!("similar: {}", previews.join(" | "));
+        let mut labels: Vec<String> = Vec::new();
+        let mut seen = FxHashSet::default();
+        for &i in g.iter().take(3) {
+            let lbl = label_words(first_content(&entries[i].body), 3);
+            if !lbl.is_empty() && seen.insert(lbl.clone()) { labels.push(lbl); }
+        }
+        let chain = format!("similar: {}", labels.join(" | "));
         let newest = *g.last().unwrap();
         entries[newest].chain = Some(chain);
         entries[newest].relevance += g.len() as f64;
@@ -230,6 +245,26 @@ fn temporal_chains(entries: &mut Vec<Compressed>, tokens: &[FxHashSet<String>]) 
     remove.sort_unstable();
     remove.dedup();
     for &idx in remove.iter().rev() { entries.remove(idx); }
+}
+
+/// Extract a short label from a content line. Better than char-truncation
+/// which cuts mid-word producing unreadable fragments.
+/// Strategy: take first 3 meaningful words, stop at parens/brackets.
+fn label_words(line: &str, n: usize) -> String {
+    let cleaned = line.trim_start_matches(|c: char| c == '#' || c == '*' || c == '-' || c == ' ');
+    let mut words = Vec::new();
+    for w in cleaned.split_whitespace() {
+        // Stop at structural noise: parens, long paths, arrows, dashes
+        if w.starts_with('(') || w.starts_with('[') || w.contains('/')
+            || w == "→" || w == "--" || w == "—" {
+            break;
+        }
+        words.push(w);
+        if words.len() >= n { break; }
+    }
+    let label = words.join(" ");
+    // Strip trailing punctuation that looks orphaned
+    label.trim_end_matches(|c: char| c == ':' || c == ',' || c == ';' || c == '—').to_string()
 }
 
 /// Longest capitalized or all-caps word — the likely entity name.

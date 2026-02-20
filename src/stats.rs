@@ -6,7 +6,7 @@ pub fn list_tags(dir: &Path) -> Result<String, String> {
     crate::cache::with_corpus(dir, |cached| {
         let mut tags: BTreeMap<String, usize> = BTreeMap::new();
         for e in cached {
-            for t in &e.tags {
+            for t in e.tags() {
                 *tags.entry(t.clone()).or_insert(0) += 1;
             }
         }
@@ -82,9 +82,9 @@ pub fn stats(dir: &Path) -> Result<String, String> {
                 oldest = Some(oldest.map_or(e.timestamp_min, |o: i32| o.min(e.timestamp_min)));
                 newest = Some(newest.map_or(e.timestamp_min, |n: i32| n.max(e.timestamp_min)));
             }
-            if !e.tags.is_empty() {
+            if !e.tags().is_empty() {
                 tagged += 1;
-                for t in &e.tags { tags.insert(t.clone()); }
+                for t in e.tags() { tags.insert(t.clone()); }
             }
         }
         let now_days = crate::time::LocalTime::now().to_days();

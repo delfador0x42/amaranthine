@@ -34,8 +34,9 @@ pub fn run_full_ext(
     let text = read_text(text)?;
     let log_path = crate::datalog::ensure_log(dir)?;
 
-    // Build body with metadata lines
-    let cleaned_tags = tags.map(|t| normalize_tags(t));
+    // Build body with metadata lines. Auto-detect tags from content when none given.
+    let cleaned_tags = tags.map(|t| normalize_tags(t))
+        .or_else(|| auto_detect_tags(&text));
     let body = build_body(&text, cleaned_tags.as_deref(), source, confidence, links);
 
     let ts = LocalTime::now();
@@ -164,6 +165,62 @@ fn singularize(s: &str) -> String {
         return s[..s.len() - 1].to_string();
     }
     s.to_string()
+}
+
+/// Auto-detect tags from content prefixes when user provides no explicit tags.
+/// Maps known content patterns to canonical tags for better classification.
+fn auto_detect_tags(text: &str) -> Option<String> {
+    let first = text.lines()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim().to_lowercase())
+        .unwrap_or_default();
+    let mut tags = Vec::new();
+    const PREFIX_TAGS: &[(&str, &str)] = &[
+        // gotchas & invariants
+        ("gotcha:", "gotcha"),
+        ("deploy gotcha:", "gotcha"),
+        ("invariant:", "invariant"),
+        ("security:", "invariant"),
+        // decisions & architecture
+        ("decision:", "decision"),
+        ("design:", "decision"),
+        ("architectural", "decision"),
+        ("module:", "module-map"),
+        ("overview:", "architecture"),
+        // data flow
+        ("data flow:", "data-flow"),
+        ("flow:", "data-flow"),
+        // performance
+        ("perf:", "performance"),
+        ("benchmark:", "performance"),
+        ("hot path:", "performance"),
+        // gaps & friction
+        ("gap:", "gap"),
+        ("missing:", "gap"),
+        ("todo:", "gap"),
+        ("friction", "gap"),
+        // how-to & procedures
+        ("how-to:", "how-to"),
+        ("impl:", "how-to"),
+        ("impl spec:", "how-to"),
+        ("shipped", "how-to"),
+        ("playbook:", "how-to"),
+        // coupling & structure
+        ("coupling:", "coupling"),
+        ("change impact:", "change-impact"),
+        ("transformation:", "coupling"),
+        ("pattern:", "pattern"),
+        // features & changes
+        ("feature:", "how-to"),
+        ("bug:", "gotcha"),
+        ("fix:", "how-to"),
+    ];
+    for &(prefix, tag) in PREFIX_TAGS {
+        if first.starts_with(prefix) && !tags.contains(&tag) {
+            tags.push(tag);
+        }
+    }
+    if tags.is_empty() { None } else { Some(tags.join(", ").to_string()) }
 }
 
 fn check_dupe(dir: &Path, topic: &str, new_text: &str) -> Option<String> {

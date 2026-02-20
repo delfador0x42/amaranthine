@@ -68,9 +68,9 @@ fn score_cached_mode(entries: &[&crate::cache::CachedEntry], terms: &[String],
             if score == 0.0 { return None; }
             debug_assert!(e.topic.chars().all(|c| !c.is_uppercase()));
             if terms.iter().any(|t| e.topic.contains(t.as_str())) { score *= 1.5; }
-            if !e.tags.is_empty() {
+            if !e.tags().is_empty() {
                 let tag_hits = terms.iter()
-                    .filter(|t| e.tags.iter().any(|tag| tag.contains(t.as_str())))
+                    .filter(|t| e.tags().iter().any(|tag| tag.contains(t.as_str())))
                     .count();
                 if tag_hits > 0 { score *= 1.0 + 0.3 * tag_hits as f64; }
             }
@@ -271,23 +271,25 @@ fn hydrate_index_hits(dir: &Path, index_data: &[u8], terms: &[String],
     let mut results = Vec::with_capacity(hits.len());
 
     for hit in hits {
-        let topic_name = match name_cache.get(&hit.topic_id) {
-            Some(n) => n.clone(),
-            None => match crate::binquery::topic_name(index_data, hit.topic_id) {
-                Ok(n) => { name_cache.insert(hit.topic_id, n.clone()); n }
+        // Entry API: single lookup, clone only when building ScoredResult
+        use std::collections::hash_map::Entry;
+        let topic_ref = match name_cache.entry(hit.topic_id) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => match crate::binquery::topic_name(index_data, hit.topic_id) {
+                Ok(n) => e.insert(n),
                 Err(_) => continue,
             },
         };
         let mut score = hit.score;
 
         // Topic-name boost — topic names are already lowercase (config::sanitize_topic)
-        if terms.iter().any(|t| topic_name.contains(t.as_str())) { score *= 1.5; }
+        if terms.iter().any(|t| topic_ref.contains(t.as_str())) { score *= 1.5; }
 
         if full_body {
             // Full hydration: read entry body from data.log
             let entry = crate::datalog::read_entry_from(log_file.as_mut().unwrap(), hit.log_offset)
                 .unwrap_or(crate::datalog::LogEntry {
-                    offset: hit.log_offset, topic: topic_name.clone(),
+                    offset: hit.log_offset, topic: topic_ref.clone(),
                     body: String::new(), timestamp_min: hit.date_minutes,
                 });
             // Tag boost from body — tags already stored lowercase
@@ -301,7 +303,7 @@ fn hydrate_index_hits(dir: &Path, index_data: &[u8], terms: &[String],
             let date = crate::time::minutes_to_date_str(entry.timestamp_min);
             let mut lines = vec![format!("## {date}")];
             for line in entry.body.lines() { lines.push(line.to_string()); }
-            results.push(ScoredResult { name: topic_name, lines, score });
+            results.push(ScoredResult { name: topic_ref.clone(), lines, score });
         } else {
             // Light hydration: build lines from index data only (zero data.log I/O)
             let tag_line = crate::binquery::reconstruct_tags(index_data, hit.entry_id).ok().flatten();
@@ -314,10 +316,10 @@ fn hydrate_index_hits(dir: &Path, index_data: &[u8], terms: &[String],
             let mut lines = vec![format!("## {date}")];
             if let Some(tl) = tag_line { lines.push(tl); }
             // Extract content from snippet (strip "[topic] date " prefix)
-            let prefix = format!("[{}] {} ", topic_name, date);
+            let prefix = format!("[{}] {} ", topic_ref, date);
             let content = hit.snippet.strip_prefix(&prefix).unwrap_or(&hit.snippet);
             if !content.is_empty() { lines.push(content.to_string()); }
-            results.push(ScoredResult { name: topic_name, lines, score });
+            results.push(ScoredResult { name: topic_ref.clone(), lines, score });
         }
     }
     results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
@@ -329,7 +331,7 @@ pub fn collect_all_tags(dir: &Path) -> Vec<(String, usize)> {
     crate::cache::with_corpus(dir, |cached| {
         let mut tags: FxHashMap<String, usize> = FxHashMap::default();
         for e in cached {
-            for t in &e.tags {
+            for t in e.tags() {
                 *tags.entry(t.clone()).or_insert(0) += 1;
             }
         }

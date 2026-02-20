@@ -100,7 +100,10 @@ pub fn iter_live(log_path: &Path) -> Result<Vec<LogEntry>, String> {
         match data[pos] {
             0x01 => {
                 let offset = pos as u32;
-                if pos + ENTRY_HEADER_SIZE > data.len() { break; }
+                if pos + ENTRY_HEADER_SIZE > data.len() {
+                    eprintln!("amaranthine: data.log truncated at byte {pos} (header incomplete, file={} bytes)", data.len());
+                    break;
+                }
                 let tl = data[pos + 1] as usize;
                 let bl = u32::from_le_bytes([
                     data[pos+2], data[pos+3], data[pos+4], data[pos+5]
@@ -109,7 +112,10 @@ pub fn iter_live(log_path: &Path) -> Result<Vec<LogEntry>, String> {
                     data[pos+6], data[pos+7], data[pos+8], data[pos+9]
                 ]);
                 let rec_end = pos + ENTRY_HEADER_SIZE + tl + bl;
-                if rec_end > data.len() { break; }
+                if rec_end > data.len() {
+                    eprintln!("amaranthine: data.log truncated at byte {pos} (entry needs {} bytes, file ends at {})", rec_end, data.len());
+                    break;
+                }
                 let topic = String::from_utf8_lossy(
                     &data[pos+ENTRY_HEADER_SIZE..pos+ENTRY_HEADER_SIZE+tl]
                 ).into();

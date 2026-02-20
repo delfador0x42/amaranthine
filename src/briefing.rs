@@ -35,11 +35,13 @@ const CATEGORIES: &[(&str, &[&str])] = &[
 const CONTENT_PREFIXES: &[(&str, &[&str])] = &[
     ("DATA FLOW", &["flow:", "data flow:"]),
     ("INVARIANTS", &["security:", "invariant:"]),
-    ("GOTCHAS", &["deploy gotcha:"]),
-    ("DECISIONS", &["design:", "architectural decision:"]),
+    ("GOTCHAS", &["deploy gotcha:", "gotcha:", "bug:"]),
+    ("DECISIONS", &["design:", "architectural decision:", "decision:"]),
     ("GAPS", &["friction", "gap:", "todo:", "missing:"]),
-    ("HOW-TO", &["shipped", "impl spec:", "impl:"]),
-    ("PERFORMANCE", &["perf:", "benchmark:"]),
+    ("HOW-TO", &["shipped", "impl spec:", "impl:", "playbook:", "how-to:", "fix:", "feature:"]),
+    ("PERFORMANCE", &["perf:", "benchmark:", "hot path:"]),
+    ("CHANGE IMPACT", &["change impact:", "coupling:", "transformation:"]),
+    ("ARCHITECTURE", &["module:", "overview:"]),
 ];
 
 const CORE_TAGS: &[&str] = &["architecture", "data-flow", "invariant", "change-impact"];
@@ -114,6 +116,34 @@ fn classify(entries: &[Compressed]) -> Classification {
         dynamic.push((tag.to_string(), clean));
     }
 
+    // Pass 4: body-keyword rescue — scan first 3 content lines for category keywords
+    // This catches entries that lack tags AND missed prefix patterns
+    let body_keywords: &[(&str, &[&str])] = &[
+        ("GOTCHAS", &["gotcha", "pitfall", "trap", "watch out", "careful", "warning"]),
+        ("DECISIONS", &["decided", "chose", "rejected", "trade-off", "tradeoff", "why not"]),
+        ("PERFORMANCE", &["latency", "throughput", "alloc", "benchmark", "cache miss", "zero-alloc"]),
+        ("CHANGE IMPACT", &["coupling", "depends on", "refactor", "breaking change", "migration"]),
+        ("ARCHITECTURE", &["architecture", "module map", "overview", "component", "layer"]),
+    ];
+    for (i, e) in entries.iter().enumerate() {
+        if assigned[i] || e.tags.iter().any(|t| t == "raw-data") { continue; }
+        let body_lower: String = e.body.lines()
+            .filter(|l| !crate::text::is_metadata_line(l) && !l.trim().is_empty())
+            .take(3)
+            .collect::<Vec<_>>().join(" ").to_lowercase();
+        for &(cat, keywords) in body_keywords {
+            if keywords.iter().any(|kw| body_lower.contains(kw)) {
+                if let Some(group) = categories.iter_mut().find(|(c, _)| *c == cat) {
+                    group.1.push(i);
+                } else {
+                    categories.push((cat, vec![i]));
+                }
+                assigned[i] = true;
+                break;
+            }
+        }
+    }
+
     // Remaining → untagged
     let untagged: Vec<usize> = (0..entries.len())
         .filter(|i| !assigned[*i] && !entries[*i].tags.iter().any(|t| t == "raw-data"))
@@ -125,11 +155,18 @@ fn classify(entries: &[Compressed]) -> Classification {
 // --- Public entry point ---
 
 pub fn format(entries: &[Compressed], query: &str, raw_count: usize,
-              primary: &[String], detail: Detail, since: Option<u64>) -> String {
+              primary: &[String], detail: Detail, since: Option<u64>,
+              focus: Option<&[String]>) -> String {
     match detail {
         Detail::Summary => format_summary(entries, query, raw_count, primary, since),
-        Detail::Scan => format_scan(entries, query, raw_count, primary, since),
-        Detail::Full => format_full(entries, query, raw_count, primary, since),
+        Detail::Scan => {
+            let cls = classify(entries);
+            format_scan_filtered(entries, query, raw_count, primary, since, &cls, focus)
+        }
+        Detail::Full => {
+            let cls = classify(entries);
+            format_full_filtered(entries, query, raw_count, primary, since, &cls, focus)
+        }
     }
 }
 
@@ -148,7 +185,7 @@ fn format_summary(entries: &[Compressed], query: &str, raw_count: usize,
         query.to_uppercase(), since_note, raw_count, entries.len(), n_topics);
 
     // Topics
-    write_topics_brief(&mut out, entries, primary);
+    write_topics(&mut out, entries, primary);
 
     // Category distribution
     let _ = write!(out, "CATEGORIES:");
@@ -191,20 +228,21 @@ fn format_summary(entries: &[Compressed], query: &str, raw_count: usize,
 
 // --- Tier 2: Scan (~50 lines) ---
 
-fn format_scan(entries: &[Compressed], query: &str, raw_count: usize,
-               primary: &[String], since: Option<u64>) -> String {
-    let cls = classify(entries);
+fn format_scan_filtered(entries: &[Compressed], query: &str, raw_count: usize,
+               primary: &[String], since: Option<u64>,
+               cls: &Classification, focus: Option<&[String]>) -> String {
     let n_topics = entries.iter().map(|e| e.topic.as_str())
         .collect::<BTreeSet<_>>().len();
     let mut out = String::new();
 
     let since_note = since.map(|h| format!(" (since {}h)", h)).unwrap_or_default();
-    let _ = writeln!(out, "=== {}{} === {} entries \u{2192} {} compressed, {} topics\n",
-        query.to_uppercase(), since_note, raw_count, entries.len(), n_topics);
-    write_topics_brief(&mut out, entries, primary);
+    let focus_note = focus.map(|f| format!(" [focus: {}]", f.join(", "))).unwrap_or_default();
+    let _ = writeln!(out, "=== {}{}{} === {} entries \u{2192} {} compressed, {} topics\n",
+        query.to_uppercase(), since_note, focus_note, raw_count, entries.len(), n_topics);
+    write_topics(&mut out, entries, primary);
 
-    // Structural
-    if !cls.structural.is_empty() {
+    // Structural (skip if focus is set and doesn't include STRUCTURAL)
+    if !cls.structural.is_empty() && cat_matches_focus("STRUCTURAL", focus) {
         let _ = writeln!(out, "--- STRUCTURAL ({}) ---", cls.structural.len());
         for &i in cls.structural.iter().take(5) { format_oneliner(&mut out, &entries[i]); }
         if cls.structural.len() > 5 {
@@ -213,8 +251,9 @@ fn format_scan(entries: &[Compressed], query: &str, raw_count: usize,
         let _ = writeln!(out);
     }
 
-    // Categories: top 3 oneliners each
+    // Categories: top 3 oneliners each (filtered by focus)
     for (cat, indices) in &cls.categories {
+        if !cat_matches_focus(cat, focus) { continue; }
         let _ = writeln!(out, "--- {} ({}) ---", cat, indices.len());
         for &i in indices.iter().take(3) { format_oneliner(&mut out, &entries[i]); }
         if indices.len() > 3 {
@@ -223,8 +262,9 @@ fn format_scan(entries: &[Compressed], query: &str, raw_count: usize,
         let _ = writeln!(out);
     }
 
-    // Dynamic
+    // Dynamic (filtered by focus)
     for (tag, indices) in &cls.dynamic {
+        if !cat_matches_focus(&tag.to_uppercase(), focus) { continue; }
         let _ = writeln!(out, "--- {} ({}) ---", tag.to_uppercase(), indices.len());
         for &i in indices.iter().take(3) { format_oneliner(&mut out, &entries[i]); }
         if indices.len() > 3 {
@@ -233,8 +273,8 @@ fn format_scan(entries: &[Compressed], query: &str, raw_count: usize,
         let _ = writeln!(out);
     }
 
-    // Untagged
-    if !cls.untagged.is_empty() {
+    // Untagged (only if no focus or focus includes UNTAGGED)
+    if !cls.untagged.is_empty() && cat_matches_focus("UNTAGGED", focus) {
         let _ = writeln!(out, "--- UNTAGGED ({}) ---", cls.untagged.len());
         for &i in cls.untagged.iter().take(3) { format_oneliner(&mut out, &entries[i]); }
         if cls.untagged.len() > 3 {
@@ -249,21 +289,22 @@ fn format_scan(entries: &[Compressed], query: &str, raw_count: usize,
 
 // --- Tier 3: Full (current behavior) ---
 
-fn format_full(entries: &[Compressed], query: &str, raw_count: usize,
-               primary: &[String], since: Option<u64>) -> String {
-    let cls = classify(entries);
+fn format_full_filtered(entries: &[Compressed], query: &str, raw_count: usize,
+               primary: &[String], since: Option<u64>,
+               cls: &Classification, focus: Option<&[String]>) -> String {
     let n_topics = entries.iter().map(|e| e.topic.as_str())
         .collect::<BTreeSet<_>>().len();
     let mut out = String::new();
 
     let since_note = since.map(|h| format!(" (since {}h)", h)).unwrap_or_default();
-    let _ = writeln!(out, "=== {}{} === {} entries \u{2192} {} compressed, {} topics\n",
-        query.to_uppercase(), since_note, raw_count, entries.len(), n_topics);
+    let focus_note = focus.map(|f| format!(" [focus: {}]", f.join(", "))).unwrap_or_default();
+    let _ = writeln!(out, "=== {}{}{} === {} entries \u{2192} {} compressed, {} topics\n",
+        query.to_uppercase(), since_note, focus_note, raw_count, entries.len(), n_topics);
     write_topics(&mut out, entries, primary);
     write_graph(&mut out, entries, primary);
 
     // Structural
-    if !cls.structural.is_empty() {
+    if !cls.structural.is_empty() && cat_matches_focus("STRUCTURAL", focus) {
         let _ = writeln!(out, "--- STRUCTURAL ({}) ---", cls.structural.len());
         for &i in cls.structural.iter().take(5) {
             let e = &entries[i];
@@ -286,10 +327,15 @@ fn format_full(entries: &[Compressed], query: &str, raw_count: usize,
         let _ = writeln!(out);
     }
 
-    // Categories with full entries
+    // Categories with full entries (filtered by focus)
     for (cat, indices) in &cls.categories {
+        if !cat_matches_focus(cat, focus) { continue; }
         let _ = writeln!(out, "--- {} ({}) ---", cat, indices.len());
-        let body_limit = if *cat == "DATA FLOW" { 10 } else { 5 };
+        let body_limit = match *cat {
+            "DATA FLOW" | "INVARIANTS" | "CHANGE IMPACT" => 10,
+            "DECISIONS" | "ARCHITECTURE" => 8,
+            _ => 5,
+        };
         for &i in indices.iter().take(5) { format_entry_n(&mut out, &entries[i], body_limit); }
         let rest = indices.len().saturating_sub(5);
         let oneliners = rest.min(10);
@@ -302,8 +348,9 @@ fn format_full(entries: &[Compressed], query: &str, raw_count: usize,
         }
     }
 
-    // Dynamic categories
+    // Dynamic categories (filtered by focus)
     for (tag, indices) in &cls.dynamic {
+        if !cat_matches_focus(&tag.to_uppercase(), focus) { continue; }
         let _ = writeln!(out, "--- {} ({}) ---", tag.to_uppercase(), indices.len());
         for &i in indices.iter().take(3) { format_entry_n(&mut out, &entries[i], 5); }
         for &i in indices.iter().skip(3).take(5) { format_oneliner(&mut out, &entries[i]); }
@@ -312,8 +359,8 @@ fn format_full(entries: &[Compressed], query: &str, raw_count: usize,
         }
     }
 
-    // Untagged: group by topic, budget primary=5, other=2
-    if !cls.untagged.is_empty() {
+    // Untagged: group by topic, budget primary=5, other=2 (only if no focus or focus includes UNTAGGED)
+    if !cls.untagged.is_empty() && cat_matches_focus("UNTAGGED", focus) {
         let _ = writeln!(out, "--- UNTAGGED ({}) ---", cls.untagged.len());
         let mut by_topic: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
         for &i in &cls.untagged {
@@ -362,10 +409,6 @@ fn write_topics(out: &mut String, entries: &[Compressed], primary: &[String]) {
     let _ = writeln!(out, "\n");
 }
 
-/// Alias: write_topics and write_topics_brief were identical. Consolidated.
-fn write_topics_brief(out: &mut String, entries: &[Compressed], primary: &[String]) {
-    write_topics(out, entries, primary);
-}
 
 fn write_graph(out: &mut String, entries: &[Compressed], primary: &[String]) {
     if primary.len() < 2 { return; }
@@ -456,7 +499,9 @@ fn format_entry_n(out: &mut String, e: &Compressed, max_lines: usize) {
     let also = format_also(&e.also_in);
     let chain_note = match &e.chain {
         Some(c) if c.starts_with("superseded") => " [SUPERSEDED]",
-        Some(_) => " (chained)",
+        Some(c) if c.starts_with("batch") => " [batch]",
+        Some(c) if c.starts_with("similar") => " [similar]",
+        Some(_) => " [chain]",
         None => "",
     };
     let refs = if e.link_in >= 2 { format!(" ({} refs)", e.link_in) } else { String::new() };
@@ -481,7 +526,7 @@ fn format_oneliner(out: &mut String, e: &Compressed) {
     let also = format_also(&e.also_in);
     let chain = match &e.chain {
         Some(c) if c.starts_with("superseded") => " [SUPERSEDED]".to_string(),
-        Some(c) => format!(" ({})", crate::text::truncate(c, 40)),
+        Some(c) => format!(" ({})", crate::text::truncate(c, 60)),
         None => String::new(),
     };
     let refs = if e.link_in >= 2 { format!(" ({} refs)", e.link_in) } else { String::new() };
@@ -503,6 +548,18 @@ fn freshness_tag(days: i64) -> &'static str {
 
 fn freshness_short(days: i64) -> &'static str {
     match days { 0 => ", today", 1 => ", 1d", 2..=7 => ", week", _ => "" }
+}
+
+/// Check if a category name matches any of the focus filter strings.
+/// No focus = show everything. Comparison is case-insensitive substring match.
+fn cat_matches_focus(cat: &str, focus: Option<&[String]>) -> bool {
+    match focus {
+        None => true,
+        Some(cats) => {
+            let cat_up = cat.to_uppercase();
+            cats.iter().any(|f| cat_up.contains(f.as_str()) || f.contains(&cat_up))
+        }
+    }
 }
 
 /// Count case-insensitive substring occurrences without allocation.

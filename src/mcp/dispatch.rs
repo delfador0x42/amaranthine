@@ -369,7 +369,9 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             let detail = if detail.is_empty() { "summary" } else { detail };
             let since_str = arg_str(args, "since");
             let since_hours = since_str.parse::<u64>().ok();
-            crate::reconstruct::run(dir, query, detail, since_hours)
+            let focus_str = arg_ref(args, "focus");
+            let focus = if focus_str.is_empty() { None } else { Some(focus_str) };
+            crate::reconstruct::run(dir, query, detail, since_hours, focus)
         }
         "compact_log" => {
             let result = crate::datalog::compact_log(dir)?;

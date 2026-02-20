@@ -164,6 +164,11 @@ fn search_v2_core(
     if post_off > data_len || meta_off > data_len || snip_off > data_len {
         return Err("index.bin truncated: section offsets exceed file size".into());
     }
+    // Validate section end bounds — meta section must fit all entries
+    let meta_end = meta_off + num_entries * std::mem::size_of::<EntryMeta>();
+    if meta_end > data_len {
+        return Err(format!("index.bin truncated: meta section ends at {} but file is {} bytes", meta_end, data_len));
+    }
     let mask = table_cap - 1;
     let num_terms = terms.len() as u16;
 
@@ -365,6 +370,30 @@ pub struct SourcedHit {
     pub topic_id: u16,
     pub source_path: String,
     pub date_minutes: i32,
+}
+
+/// Find entry IDs whose [source:] path contains the given filename.
+/// O(N) scan over EntryMeta, byte-level substring match on source pool.
+/// Zero allocation for non-matching entries.
+pub fn source_entries_for_file(data: &[u8], filename: &str) -> Result<Vec<u32>, String> {
+    let hdr = read_header(data)?;
+    let meta_off = { hdr.meta_off } as usize;
+    let src_off = { hdr.source_off } as usize;
+    let n = { hdr.num_entries } as usize;
+    let fb = filename.as_bytes();
+    if fb.is_empty() { return Ok(Vec::new()); }
+    let mut matches = Vec::new();
+    for i in 0..n {
+        let m = read_at::<EntryMeta>(data, meta_off + i * std::mem::size_of::<EntryMeta>())?;
+        let sl = { m.source_len } as usize;
+        if sl < fb.len() { continue; }
+        let so = src_off + { m.source_off } as usize;
+        if so + sl > data.len() { continue; }
+        if data[so..so + sl].windows(fb.len()).any(|w| w == fb) {
+            matches.push(i as u32);
+        }
+    }
+    Ok(matches)
 }
 
 pub fn sourced_entries(data: &[u8]) -> Result<Vec<SourcedHit>, String> {

@@ -18,7 +18,7 @@ pub fn export(dir: &Path) -> Result<String, String> {
             let group = &grouped[name.as_str()];
             let entries: Vec<Value> = group.iter().map(|e| {
                 let date = e.date_str();
-                let tags_list: Vec<Value> = e.tags.iter()
+                let tags_list: Vec<Value> = e.tags().iter()
                     .map(|t| Value::Str(t.clone())).collect();
                 let mut body_lines: Vec<&str> = Vec::new();
                 for line in e.body.lines() {

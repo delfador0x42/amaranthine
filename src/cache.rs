@@ -1,6 +1,6 @@
 //! In-memory corpus cache with data.log mtime invalidation.
 //! Eliminates file I/O + tokenization on repeated corpus-path searches.
-//! Cache holds pre-tokenized entries; filters applied at query time.
+//! Cache holds pre-tokenized entries; metadata parsed lazily on first access.
 
 use crate::fxhash::FxHashMap;
 use crate::intern::InternedStr;
@@ -15,17 +15,26 @@ pub struct CachedEntry {
     pub offset: u32,
     pub tf_map: FxHashMap<String, usize>,
     pub word_count: usize,
-    pub tags: Vec<String>, // pre-parsed from [tags: ...] metadata — no re-parsing on access
-    pub source: Option<String>,
-    pub confidence: f64, // 0.0-1.0, default 1.0; explicit from [confidence:] metadata
-    pub links: Vec<(String, usize)>, // (topic, entry_index) from [links:] metadata
-    pub snippet: String, // precomputed "[topic] date content" for index builder
+    pub snippet: String,
+    meta: std::cell::OnceCell<crate::text::EntryMetadata>,
 }
 
 impl CachedEntry {
-    /// Check if entry has a specific tag. O(tags) slice scan, no re-parsing.
+    /// Lazily parse metadata from body on first access.
+    fn meta(&self) -> &crate::text::EntryMetadata {
+        self.meta.get_or_init(|| crate::text::extract_all_metadata(&self.body))
+    }
+    /// Tags from [tags: ...] metadata. Lazy: parsed on first access.
+    pub fn tags(&self) -> &[String] { &self.meta().tags }
+    /// Source path from [source: ...] metadata. Lazy.
+    pub fn source(&self) -> Option<&str> { self.meta().source.as_deref() }
+    /// Confidence value (0.0-1.0, default 1.0). Lazy.
+    pub fn confidence(&self) -> f64 { self.meta().confidence }
+    /// Narrative links from [links: ...] metadata. Lazy.
+    pub fn links(&self) -> &[(String, usize)] { &self.meta().links }
+    /// Check if entry has a specific tag.
     pub fn has_tag(&self, tag: &str) -> bool {
-        self.tags.iter().any(|t| t == tag)
+        self.tags().iter().any(|t| t == tag)
     }
     /// Format timestamp as "YYYY-MM-DD HH:MM".
     pub fn date_str(&self) -> String {
@@ -45,25 +54,26 @@ impl CachedEntry {
     }
     /// Confidence as u8 (0-255) for binary index.
     pub fn confidence_u8(&self) -> u8 {
-        (self.confidence.clamp(0.0, 1.0) * 255.0) as u8
+        (self.confidence().clamp(0.0, 1.0) * 255.0) as u8
     }
     /// Whether this entry has narrative links to other entries.
     pub fn has_links(&self) -> bool {
-        !self.links.is_empty()
+        !self.links().is_empty()
     }
 }
 
 struct CachedCorpus {
     mtime: SystemTime,
     entries: Vec<CachedEntry>,
+    intern_pool: FxHashMap<String, InternedStr>,
 }
-
-static CACHE: Mutex<Option<CachedCorpus>> = Mutex::new(None);
 
 /// Invalidate cache (call after any write to data.log).
 pub fn invalidate() {
     if let Ok(mut g) = CACHE.lock() { *g = None; }
 }
+
+static CACHE: Mutex<Option<CachedCorpus>> = Mutex::new(None);
 
 /// Access cached corpus via closure. Reloads from data.log only if mtime changed.
 /// The closure receives all entries (unfiltered). Filter in the closure.
@@ -83,30 +93,26 @@ where F: FnOnce(&[CachedEntry]) -> R {
         }
     }
 
-    // Cache miss: reload from data.log
+    // Cache miss: reload from data.log (metadata parsed lazily on first access)
     let raw_entries = crate::datalog::iter_live(&log_path)?;
     let mut entries = Vec::with_capacity(raw_entries.len());
-    // Intern topic names: ~45 unique across ~1000 entries → 955 fewer heap allocs
-    let mut interned: Vec<InternedStr> = Vec::with_capacity(64);
+    let mut intern_pool: FxHashMap<String, InternedStr> = FxHashMap::default();
     for e in raw_entries {
-        let topic = match interned.iter().find(|t| t.as_str() == e.topic.as_str()) {
+        let topic = match intern_pool.get(e.topic.as_str()) {
             Some(t) => t.clone(),
-            None => { let t = InternedStr::new(&e.topic); interned.push(t.clone()); t }
+            None => { let t = InternedStr::new(&e.topic); intern_pool.insert(e.topic.clone(), t.clone()); t }
         };
-        // Single-pass metadata extraction: replaces 4 separate line scans
-        let meta = crate::text::extract_all_metadata(&e.body);
         let mut tf_map: FxHashMap<String, usize> = crate::fxhash::map_with_capacity(32);
         let word_count = crate::text::tokenize_into_tfmap(&e.body, &mut tf_map);
         let snippet = build_snippet(topic.as_str(), e.timestamp_min, &e.body);
         entries.push(CachedEntry {
             topic, body: e.body, timestamp_min: e.timestamp_min, offset: e.offset,
-            tf_map, word_count, tags: meta.tags, source: meta.source,
-            confidence: meta.confidence, links: meta.links, snippet,
+            tf_map, word_count, snippet, meta: std::cell::OnceCell::new(),
         });
     }
 
     let result = f(&entries);
-    *guard = Some(CachedCorpus { mtime: cur_mtime, entries });
+    *guard = Some(CachedCorpus { mtime: cur_mtime, entries, intern_pool });
     Ok(result)
 }
 
@@ -119,18 +125,16 @@ pub fn append_to_cache(dir: &Path, topic: &str, body: &str, ts_min: i32, offset:
         .and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
     let mut guard = match CACHE.lock() { Ok(g) => g, Err(_) => return };
     let cache = match guard.as_mut() { Some(c) => c, None => return };
-    let topic_interned = cache.entries.iter()
-        .find(|e| e.topic.as_str() == topic)
-        .map(|e| e.topic.clone())
-        .unwrap_or_else(|| InternedStr::new(topic));
-    let meta = crate::text::extract_all_metadata(body);
+    let topic_interned = match cache.intern_pool.get(topic) {
+        Some(t) => t.clone(),
+        None => { let t = InternedStr::new(topic); cache.intern_pool.insert(topic.to_string(), t.clone()); t }
+    };
     let mut tf_map = crate::fxhash::map_with_capacity(32);
     let word_count = crate::text::tokenize_into_tfmap(body, &mut tf_map);
     let snippet = build_snippet(topic, ts_min, body);
     cache.entries.push(CachedEntry {
         topic: topic_interned, body: body.to_string(), timestamp_min: ts_min,
-        offset, tf_map, word_count, tags: meta.tags, source: meta.source,
-        confidence: meta.confidence, links: meta.links, snippet,
+        offset, tf_map, word_count, snippet, meta: std::cell::OnceCell::new(),
     });
     cache.mtime = cur_mtime;
 }

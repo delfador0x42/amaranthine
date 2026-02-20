@@ -17,7 +17,7 @@ fn run_inner(dir: &Path, query: Option<&str>, plain: bool, brief: bool) -> Resul
 
     // Query provided → delegate to reconstruct for one-shot briefing
     if let Some(q) = query {
-        return crate::reconstruct::run(dir, q, "summary", None);
+        return crate::reconstruct::run(dir, q, "summary", None, None);
     }
 
     // Synthesized meta-briefing for cold starts
@@ -70,7 +70,7 @@ fn run_inner(dir: &Path, query: Option<&str>, plain: bool, brief: bool) -> Resul
             let mut tag_freq: BTreeMap<&str, usize> = BTreeMap::new();
             for e in cached {
                 if e.days_old(now_days) > 7 { continue; }
-                for t in &e.tags {
+                for t in e.tags() {
                     if t != "raw-data" { *tag_freq.entry(t.as_str()).or_default() += 1; }
                 }
             }

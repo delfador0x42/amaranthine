@@ -58,7 +58,11 @@ impl IndexBuilder {
 
         for (term, tf) in tf_map {
             if term.is_empty() || term.len() < 2 { continue; }
-            self.terms.entry(term.to_string()).or_default().push((entry_id, tf));
+            if let Some(v) = self.terms.get_mut(term) {
+                v.push((entry_id, tf));
+            } else {
+                self.terms.insert(term.to_string(), vec![(entry_id, tf)]);
+            }
         }
 
         for tag in &tags { *self.tag_freq.entry(tag.clone()).or_insert(0) += 1; }
@@ -84,7 +88,11 @@ impl IndexBuilder {
         for t in tokens { *tf_map.entry(t.as_str()).or_insert(0) += 1; }
         for (term, tf) in tf_map {
             if term.is_empty() || term.len() < 2 { continue; }
-            self.terms.entry(term.to_string()).or_default().push((entry_id, tf));
+            if let Some(v) = self.terms.get_mut(term) {
+                v.push((entry_id, tf));
+            } else {
+                self.terms.insert(term.to_string(), vec![(entry_id, tf)]);
+            }
         }
         for tag in &tags { *self.tag_freq.entry(tag.clone()).or_insert(0) += 1; }
         self.entries.push(EntryInfo {
@@ -106,7 +114,12 @@ impl IndexBuilder {
         self.total_words += word_count;
         for (term, &tf) in tf_map {
             if term.len() < 2 { continue; }
-            self.terms.entry(term.clone()).or_default().push((entry_id, tf.min(u16::MAX as usize) as u16));
+            let posting = (entry_id, tf.min(u16::MAX as usize) as u16);
+            if let Some(v) = self.terms.get_mut(term.as_str()) {
+                v.push(posting);
+            } else {
+                self.terms.insert(term.clone(), vec![posting]);
+            }
         }
         for tag in tags { *self.tag_freq.entry(tag.clone()).or_insert(0) += 1; }
         self.entries.push(EntryInfo {
@@ -361,10 +374,10 @@ fn rebuild_inner(dir: &Path, persist: bool) -> Result<(String, Vec<u8>), String>
         let mut builder = IndexBuilder::new();
         for e in cached {
             let tid = builder.add_topic(&e.topic);
-            let conf = if e.confidence < 1.0 { Some(e.confidence) } else { None };
+            let conf = if e.confidence() < 1.0 { Some(e.confidence()) } else { None };
             builder.add_entry_from_tfmap(
                 tid, &e.snippet, e.timestamp_min,
-                e.source.as_deref().unwrap_or(""), e.offset, &e.tags,
+                e.source().unwrap_or(""), e.offset, e.tags(),
                 &e.tf_map, e.word_count, conf,
             );
         }

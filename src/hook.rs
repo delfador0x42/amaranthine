@@ -63,7 +63,8 @@ pub fn hook_output(context: &str) -> String {
 
 /// PreToolUse: inject amaranthine entries relevant to the file being accessed.
 /// Uses fast-path byte scanning to extract tool_name and file_path without full JSON parse.
-/// v6.5: mmap index.bin directly — eliminates socket round-trip (~150-300μs saved per hook).
+/// v7.3: Smart Ambient Context — multi-layer search with source-path matching,
+/// symbol extraction from file, topic affinity, and deduplication.
 fn ambient(input: &str, dir: &Path) -> Result<String, String> {
     if input.is_empty() { return Ok(String::new()); }
 
@@ -76,32 +77,29 @@ fn ambient(input: &str, dir: &Path) -> Result<String, String> {
     }
 
     // Fast-path: extract file_path or path from tool_input
-    let path = extract_json_str(input, "file_path")
+    let file_path = extract_json_str(input, "file_path")
         .or_else(|| extract_json_str(input, "\"path\""))
         .unwrap_or("");
-    if path.is_empty() { return Ok(String::new()); }
+    if file_path.is_empty() { return Ok(String::new()); }
 
-    let stem = std::path::Path::new(path)
+    let stem = std::path::Path::new(file_path)
         .file_stem().and_then(|s| s.to_str()).unwrap_or("");
     if stem.len() < 3 { return Ok(String::new()); }
 
     // Extract removed symbols for Edit refactor detection (needs full parse)
     let syms = if is_edit {
-        // Only parse the full JSON if we actually need old_string/new_string
         match crate::json::parse(input) {
             Ok(val) => extract_removed_syms(&val, stem),
             Err(_) => vec![],
         }
     } else { vec![] };
 
-    // Fast path: mmap index.bin — zero-copy, no socket overhead, no full file read.
-    // MCP server persists index.bin on every hot rebuild (atomic rename).
     let data = match mmap_index(dir) {
         Some(d) => d,
         None => return Ok(String::new()),
     };
     let sym_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
-    let out = query_ambient(data, stem, &sym_refs);
+    let out = query_ambient(data, stem, file_path, &sym_refs);
     if out.is_empty() { return Ok(String::new()); }
     Ok(hook_output(&out))
 }
@@ -233,15 +231,80 @@ pub fn extract_removed_syms(input: &crate::json::Value, stem: &str) -> Vec<Strin
     removed
 }
 
-/// Run ambient queries against index data (mmap or disk).
-/// Zero format!() calls — all output built with push_str.
-/// v6.6: unified implementation used by both hook.rs and sock.rs — takes &[&str] for syms.
-/// v6.5: stack-allocated structural query — zero heap alloc for query string.
-pub fn query_ambient(data: &[u8], stem: &str, syms: &[&str]) -> String {
-    let results = crate::binquery::search(data, stem, 5).unwrap_or_default();
-    let has_results = !results.is_empty() && !results.starts_with("0 match");
+/// Smart Ambient Context: multi-layer search with deduplication.
+/// v7.3: source-path matching, symbol extraction from file, topic affinity.
+/// Layer 1: Source-path matches (entries with [source: ...filename...])
+/// Layer 2: Symbol-based OR search (symbols extracted from file content)
+/// Layer 3: Global BM25 search (existing stem search, capped)
+/// Layer 4: Structural coupling (existing)
+/// Layer 5: Refactor impact (existing, Edit only)
+pub fn query_ambient(data: &[u8], stem: &str, file_path: &str, syms: &[&str]) -> String {
+    let filename = std::path::Path::new(file_path)
+        .file_name().and_then(|f| f.to_str()).unwrap_or(stem);
+    let mut seen = crate::fxhash::FxHashSet::default();
+    let mut out = String::new();
 
-    // Stack-allocated query string for structural search
+    // Layer 1: Source-path matches — entries explicitly about this file
+    let source_ids = crate::binquery::source_entries_for_file(data, filename).unwrap_or_default();
+    if !source_ids.is_empty() {
+        out.push_str("source-linked (");
+        out.push_str(filename);
+        out.push_str("):\n");
+        for &eid in &source_ids {
+            seen.insert(eid);
+            if let Ok(snip) = crate::binquery::entry_snippet(data, eid) {
+                if !snip.is_empty() {
+                    out.push_str("  ");
+                    out.push_str(&snip);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+
+    // Layer 2: Symbol-based search — extract fn/struct/enum names from file, OR-search
+    let file_symbols = extract_file_symbols(file_path);
+    if !file_symbols.is_empty() {
+        let query = build_symbol_query(&file_symbols, stem);
+        if !query.is_empty() {
+            let filter = crate::binquery::FilterPred::none();
+            let hits = crate::binquery::search_v2_or(data, &query, &filter, 8)
+                .unwrap_or_default();
+            let new_hits: Vec<_> = hits.into_iter()
+                .filter(|h| seen.insert(h.entry_id))
+                .take(5)
+                .collect();
+            if !new_hits.is_empty() {
+                if !out.is_empty() { out.push_str("---\n"); }
+                out.push_str("symbol context:\n");
+                for hit in &new_hits {
+                    out.push_str("  ");
+                    out.push_str(&hit.snippet);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+
+    // Layer 3: Global BM25 search (stem keyword)
+    let global = crate::binquery::search_v2(data, stem, 5).unwrap_or_default();
+    let global_new: Vec<_> = global.into_iter()
+        .filter(|h| seen.insert(h.entry_id))
+        .take(3)
+        .collect();
+    if !global_new.is_empty() {
+        if !out.is_empty() { out.push_str("---\n"); }
+        out.push_str("related (");
+        out.push_str(stem);
+        out.push_str("):\n");
+        for hit in &global_new {
+            out.push_str("  ");
+            out.push_str(&hit.snippet);
+            out.push('\n');
+        }
+    }
+
+    // Layer 4: Structural coupling
     let mut sq_buf = [0u8; 128];
     let sq_prefix = b"structural ";
     let sq_len = sq_prefix.len() + stem.len();
@@ -249,50 +312,121 @@ pub fn query_ambient(data: &[u8], stem: &str, syms: &[&str]) -> String {
         sq_buf[..sq_prefix.len()].copy_from_slice(sq_prefix);
         sq_buf[sq_prefix.len()..sq_len].copy_from_slice(stem.as_bytes());
         let sq = unsafe { std::str::from_utf8_unchecked(&sq_buf[..sq_len]) };
-        crate::binquery::search(data, sq, 3).unwrap_or_default()
+        crate::binquery::search_v2(data, sq, 3).unwrap_or_default()
     } else {
         let mut sq = String::with_capacity(sq_len);
         sq.push_str("structural ");
         sq.push_str(stem);
-        crate::binquery::search(data, &sq, 3).unwrap_or_default()
+        crate::binquery::search_v2(data, &sq, 3).unwrap_or_default()
     };
-    let has_structural = !structural.is_empty() && !structural.starts_with("0 match");
+    let structural_new: Vec<_> = structural.into_iter()
+        .filter(|h| seen.insert(h.entry_id))
+        .collect();
+    if !structural_new.is_empty() {
+        if !out.is_empty() { out.push_str("---\n"); }
+        out.push_str("structural coupling:\n");
+        for hit in &structural_new {
+            out.push_str("  ");
+            out.push_str(&hit.snippet);
+            out.push('\n');
+        }
+    }
 
-    let mut refactor = String::new();
+    // Layer 5: Refactor impact (Edit only)
     if !syms.is_empty() {
-        refactor.push_str("\nREFACTOR IMPACT (symbols modified: ");
+        let mut refactor = String::new();
+        refactor.push_str("REFACTOR IMPACT (symbols modified: ");
         for (i, sym) in syms.iter().enumerate() {
             if i > 0 { refactor.push_str(", "); }
             refactor.push_str(sym);
         }
         refactor.push_str("):\n");
+        let mut has_hits = false;
         for sym in syms {
-            let hits = crate::binquery::search(data, sym, 3).unwrap_or_default();
-            if !hits.is_empty() && !hits.starts_with("0 match") {
-                refactor.push_str(&hits);
+            let hits = crate::binquery::search_v2(data, sym, 3).unwrap_or_default();
+            for hit in hits {
+                if seen.insert(hit.entry_id) {
+                    refactor.push_str("  ");
+                    refactor.push_str(&hit.snippet);
+                    refactor.push('\n');
+                    has_hits = true;
+                }
+            }
+        }
+        if has_hits {
+            if !out.is_empty() { out.push_str("---\n"); }
+            out.push_str(&refactor);
+        }
+    }
+
+    out
+}
+
+/// Extract key symbol names (fn/struct/enum/trait/class) from a source file.
+/// Reads the file directly — hook has filesystem access.
+/// Returns raw symbol names for tokenization into search terms.
+/// Caps at 500 lines and 20 symbols to bound cost.
+fn extract_file_symbols(path: &str) -> Vec<String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+
+    static KEYWORDS: &[&str] = &[
+        "fn ", "struct ", "enum ", "trait ",              // Rust
+        "func ", "class ", "protocol ", "extension ",     // Swift
+    ];
+
+    let mut symbols = Vec::with_capacity(16);
+    for line in content.lines().take(500) {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") || trimmed.starts_with("///")
+            || trimmed.starts_with('#') || trimmed.starts_with("/*") { continue; }
+        for kw in KEYWORDS {
+            if let Some(pos) = trimmed.find(kw) {
+                let rest = &trimmed[pos + kw.len()..];
+                // Skip generic params: impl<T> Foo → start after Foo
+                let rest = if *kw == "fn " || *kw == "func " {
+                    rest
+                } else {
+                    rest.trim_start_matches(|c: char| c == '<' || c == '\'')
+                        .split(|c: char| c == '>' || c == ' ')
+                        .next().unwrap_or(rest)
+                };
+                let name: String = rest.chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if name.len() >= 3 && name.as_bytes()[0].is_ascii_alphabetic() {
+                    symbols.push(name);
+                }
             }
         }
     }
-    let has_refactor = !refactor.is_empty();
-    if !has_results && !has_structural && !has_refactor { return String::new(); }
+    symbols.sort();
+    symbols.dedup();
+    symbols.truncate(20);
+    symbols
+}
 
-    let mut out = String::new();
-    if has_results {
-        out.push_str("amaranthine entries for ");
-        out.push_str(stem);
-        out.push_str(":\n");
-        out.push_str(&results);
+/// Build a search query from extracted symbols.
+/// Uses compound forms (CamelCase joined) for specificity.
+/// Excludes the stem to avoid redundancy with Layer 3.
+fn build_symbol_query(symbols: &[String], stem: &str) -> String {
+    let mut terms = Vec::with_capacity(symbols.len());
+    let stem_lower = stem.to_lowercase();
+    for sym in symbols {
+        // Tokenize to get compound forms + components
+        let tokens = crate::text::tokenize(sym);
+        for tok in tokens {
+            if tok.len() >= 3 && tok != stem_lower {
+                terms.push(tok);
+            }
+        }
     }
-    if has_structural {
-        if has_results { out.push_str("\n---\n"); }
-        out.push_str("structural coupling:\n");
-        out.push_str(&structural);
-    }
-    if has_refactor {
-        if has_results || has_structural { out.push_str("\n---\n"); }
-        out.push_str(&refactor);
-    }
-    out
+    terms.sort();
+    terms.dedup();
+    terms.truncate(15); // cap query terms
+    terms.join(" ")
 }
 
 /// PermissionRequest: auto-approve all amaranthine MCP tool calls.

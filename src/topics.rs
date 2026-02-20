@@ -34,7 +34,7 @@ fn list_inner(dir: &Path, compact: bool) -> Result<String, String> {
         for e in cached {
             let info = topics.entry(e.topic.to_string()).or_default();
             info.count += 1;
-            for t in &e.tags { info.tags.insert(t.clone()); }
+            for t in e.tags() { info.tags.insert(t.clone()); }
             info.last_preview = entry_preview(&e.body);
         }
         let mut out = String::new();

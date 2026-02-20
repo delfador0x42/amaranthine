@@ -235,8 +235,13 @@ fn do_reload() {
             if release.exists() { Some(release) } else { None }
         });
     if let Some(src_bin) = src {
-        if let Err(e) = std::fs::copy(&src_bin, &exe) {
+        // Atomic copy: write to temp file, then rename (prevents corrupted binary on crash)
+        let tmp = exe.with_extension("tmp");
+        if let Err(e) = std::fs::copy(&src_bin, &tmp) {
             eprintln!("reload: copy failed: {e}");
+        } else if let Err(e) = std::fs::rename(&tmp, &exe) {
+            eprintln!("reload: rename failed: {e}");
+            let _ = std::fs::remove_file(&tmp);
         } else {
             let _ = std::process::Command::new("codesign")
                 .args(["-s", "-", "-f"]).arg(&exe).output();
@@ -351,4 +356,4 @@ pub(crate) fn ensure_index_fresh(dir: &Path) {
 }
 
 /// Pre-serialized initialize result — zero allocation, written directly to stdout.
-const INIT_RESULT: &str = r#"{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"amaranthine","version":"7.0.0"}}"#;
+const INIT_RESULT: &str = r#"{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"amaranthine","version":"7.2.0"}}"#;

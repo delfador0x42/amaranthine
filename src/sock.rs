@@ -117,16 +117,17 @@ fn handle_topics() -> String {
 }
 
 /// Combined ambient hook query with fast string extraction — no full JSON parse needed.
-/// Request: {"op":"ambient","stem":"cache","syms":["removed1","removed2"]}
-/// v6.6: calls unified hook::query_ambient — eliminates 55-line duplicated function.
+/// Request: {"op":"ambient","stem":"cache","path":"/full/path/to/cache.rs","syms":["removed1","removed2"]}
+/// v7.3: passes file_path for smart ambient (source-path matching + symbol extraction).
 fn handle_ambient_fast(line: &str) -> String {
     let stem = match crate::hook::extract_json_str(line, "stem") {
         Some(s) if !s.is_empty() => s,
         _ => return String::new(),
     };
+    let file_path = crate::hook::extract_json_str(line, "\"path\"").unwrap_or("");
     let syms = extract_syms_array(line);
     crate::mcp::with_index(|data| {
-        crate::hook::query_ambient(data, stem, &syms)
+        crate::hook::query_ambient(data, stem, file_path, &syms)
     }).unwrap_or_default()
 }
 
@@ -216,7 +217,7 @@ fn handle_hook_relay(line: &str) -> String {
     let sym_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
 
     let ctx = crate::mcp::with_index(|data| {
-        crate::hook::query_ambient(data, stem, &sym_refs)
+        crate::hook::query_ambient(data, stem, path, &sym_refs)
     }).unwrap_or_default();
     if ctx.is_empty() { return String::new(); }
     crate::hook::hook_output(&ctx)
