@@ -144,19 +144,25 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             let query = arg_ref(args, "query");
             let detail = arg_ref(args, "detail");
             let filter = build_filter(args);
+            // v10: Phase-aware default limit — build phase gets tighter results
+            let explicit_limit = arg_ref(args, "limit").parse::<usize>().ok();
+            let session_limit = if explicit_limit.is_none() {
+                phase_aware_limit(dir)
+            } else {
+                explicit_limit
+            };
             match detail {
                 "count" => crate::search::count(dir, query, &filter),
                 "topics" => crate::search::run_topics(dir, query, &filter),
                 "grouped" => {
-                    let limit = arg_ref(args, "limit").parse::<usize>().ok();
                     let guard = super::INDEX.read().map_err(|e| e.to_string())?;
                     let idx = guard.as_ref().map(|i| i.data.as_slice());
-                    let result = crate::search::run_grouped(dir, query, limit, &filter, idx);
+                    let result = crate::search::run_grouped(dir, query, session_limit, &filter, idx);
                     drop(guard);
                     result
                 }
                 "index" => {
-                    let limit = arg_ref(args, "limit").parse::<usize>().unwrap_or(10);
+                    let limit = explicit_limit.unwrap_or_else(|| session_limit.unwrap_or(10));
                     let guard = super::INDEX.read().map_err(|e| e.to_string())?;
                     let data = match guard.as_ref() {
                         Some(idx) => std::borrow::Cow::Borrowed(idx.data.as_slice()),
@@ -169,13 +175,12 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
                     crate::binquery::search(&data, query, limit)
                 }
                 _ => {
-                    let limit = arg_ref(args, "limit").parse::<usize>().ok();
                     let guard = super::INDEX.read().map_err(|e| e.to_string())?;
                     let idx = guard.as_ref().map(|i| i.data.as_slice());
                     let result = match detail {
-                        "full" => crate::search::run(dir, query, true, limit, &filter, idx),
-                        "brief" => crate::search::run_brief(dir, query, limit, &filter, idx),
-                        _ => crate::search::run_medium(dir, query, limit, &filter, idx),
+                        "full" => crate::search::run(dir, query, true, session_limit, &filter, idx),
+                        "brief" => crate::search::run_brief(dir, query, session_limit, &filter, idx),
+                        _ => crate::search::run_medium(dir, query, session_limit, &filter, idx),
                     };
                     drop(guard);
                     result
@@ -346,15 +351,71 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
             Ok(result)
         }
         "session" => {
-            let log = super::SESSION_LOG.lock().map_err(|e| e.to_string())?;
-            if log.is_empty() {
-                Ok("no stores this session".into())
-            } else {
-                let mut out = format!("{} stores this session:\n", log.len());
-                for entry in log.iter() {
-                    out.push_str(&format!("  {entry}\n"));
+            let action = arg_ref(args, "action");
+            match action {
+                "set_phase" => {
+                    let phase = arg_ref(args, "phase");
+                    let mut s = crate::session::Session::load_or_new(dir);
+                    s.phase = crate::session::Phase::from_str_pub(phase);
+                    s.save(dir).ok();
+                    Ok(format!("phase set to: {}", s.phase.as_str()))
                 }
-                Ok(out)
+                "add_focus" => {
+                    let topic = arg_ref(args, "topic");
+                    if topic.is_empty() { return Err("topic required".into()); }
+                    let mut s = crate::session::Session::load_or_new(dir);
+                    s.add_focus_topic(topic);
+                    s.save(dir).ok();
+                    Ok(format!("focus topics: {}", s.focus_topics.join(", ")))
+                }
+                "note" => {
+                    let text = arg_ref(args, "text");
+                    if text.is_empty() { return Err("text required".into()); }
+                    let mut s = crate::session::Session::load_or_new(dir);
+                    s.queue_note(text.to_string());
+                    s.save(dir).ok();
+                    Ok(format!("queued ({} pending)", s.pending_notes.len()))
+                }
+                _ => {
+                    // Default: show session state + store log
+                    let mut out = String::with_capacity(512);
+                    if let Some(s) = crate::session::Session::load(dir) {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs()).unwrap_or(0);
+                        let dur = now.saturating_sub(s.started) / 60;
+                        out.push_str(&format!("session: {} ({}min, phase={})\n",
+                            s.id, dur, s.phase.as_str()));
+                        if !s.focus_topics.is_empty() {
+                            out.push_str(&format!("focus: {}\n", s.focus_topics.join(", ")));
+                        }
+                        let edits = s.files.iter()
+                            .filter(|f| matches!(f.op, crate::session::FileOp::Edited | crate::session::FileOp::Created))
+                            .count();
+                        out.push_str(&format!("files: {} touched ({} edited), {} entries injected\n",
+                            s.files.len(), edits, s.injected.len()));
+                        if let Some(ref b) = s.last_build {
+                            out.push_str(&format!("last build: {}\n",
+                                if b.ok { "OK" } else { "FAILED" }));
+                        }
+                        if !s.pending_notes.is_empty() {
+                            out.push_str(&format!("{} pending notes\n", s.pending_notes.len()));
+                        }
+                    } else {
+                        out.push_str("no active session\n");
+                    }
+                    // Also show store log
+                    let log = super::SESSION_LOG.lock().map_err(|e| e.to_string())?;
+                    if !log.is_empty() {
+                        out.push_str(&format!("\n{} stores this session:\n", log.len()));
+                        for entry in log.iter() {
+                            out.push_str("  ");
+                            out.push_str(entry);
+                            out.push('\n');
+                        }
+                    }
+                    Ok(out)
+                }
             }
         }
         "brief" => {
@@ -499,5 +560,19 @@ fn build_filter(args: Option<&Value>) -> crate::search::Filter {
         tag: if tag.is_empty() { None } else { Some(tag.to_string()) },
         topic: if topic.is_empty() { None } else { Some(topic.to_string()) },
         mode,
+    }
+}
+
+/// Phase-aware default search limit from session state.
+/// Research phase: 10 (broad exploration). Build phase: 5 (focused).
+/// Debug phase: 8 (targeted). Unknown: None (use existing default).
+fn phase_aware_limit(dir: &Path) -> Option<usize> {
+    let session = crate::session::Session::load(dir)?;
+    match session.phase {
+        crate::session::Phase::Research => Some(10),
+        crate::session::Phase::Build => Some(5),
+        crate::session::Phase::Verify => Some(5),
+        crate::session::Phase::Debug => Some(8),
+        crate::session::Phase::Unknown => None,
     }
 }

@@ -36,6 +36,7 @@ pub mod reconstruct;
 pub mod reverse;
 pub mod score;
 pub mod search;
+pub mod session;
 pub mod sock;
 pub mod stats;
 pub mod store;

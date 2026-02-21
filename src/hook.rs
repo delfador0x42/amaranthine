@@ -10,7 +10,7 @@ pub fn run(hook_type: &str, dir: &Path) -> Result<String, String> {
     // approve-mcp and stop need no stdin at all
     match hook_type {
         "approve-mcp" => return Ok(APPROVE_MCP_RESPONSE.into()),
-        "stop" => return stop(),
+        "stop" => return stop(dir),
         _ => {}
     }
 
@@ -20,7 +20,7 @@ pub fn run(hook_type: &str, dir: &Path) -> Result<String, String> {
 
     match hook_type {
         "ambient" => ambient(input, dir),
-        "post-build" => post_build(input),
+        "post-build" => post_build(input, dir),
         "subagent-start" => subagent_start(dir),
         _ => Err(format!("unknown hook type: {hook_type}")),
     }
@@ -65,6 +65,7 @@ pub fn hook_output(context: &str) -> String {
 /// Uses fast-path byte scanning to extract tool_name and file_path without full JSON parse.
 /// v7.3: Smart Ambient Context — multi-layer search with source-path matching,
 /// symbol extraction from file, topic affinity, and deduplication.
+/// v10: Session-aware — dedup via injected set, track files + tools.
 fn ambient(input: &str, dir: &Path) -> Result<String, String> {
     if input.is_empty() { return Ok(String::new()); }
 
@@ -86,6 +87,18 @@ fn ambient(input: &str, dir: &Path) -> Result<String, String> {
         .file_stem().and_then(|s| s.to_str()).unwrap_or("");
     if stem.len() < 3 { return Ok(String::new()); }
 
+    // Load session for dedup + tracking
+    let mut session = crate::session::Session::load_or_new(dir);
+    session.record_tool(tool);
+
+    // Track file operation
+    let file_op = match tool {
+        "Write" => crate::session::FileOp::Created,
+        "Edit" | "NotebookEdit" => crate::session::FileOp::Edited,
+        _ => crate::session::FileOp::Read,
+    };
+    session.track_file(file_path, file_op);
+
     // Extract removed symbols for Edit refactor detection (needs full parse)
     let syms = if is_edit {
         match crate::json::parse(input) {
@@ -96,10 +109,17 @@ fn ambient(input: &str, dir: &Path) -> Result<String, String> {
 
     let data = match mmap_index(dir) {
         Some(d) => d,
-        None => return Ok(String::new()),
+        None => {
+            session.save(dir).ok();
+            return Ok(String::new());
+        }
     };
     let sym_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
-    let out = query_ambient(data, stem, file_path, &sym_refs);
+    let out = query_ambient(data, stem, file_path, &sym_refs, Some(&mut session));
+
+    // Save session (writes dedup state + file tracking)
+    session.save(dir).ok();
+
     if out.is_empty() { return Ok(String::new()); }
     Ok(hook_output(&out))
 }
@@ -146,22 +166,59 @@ pub fn extract_json_str<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     None
 }
 
-/// PostToolUse(Bash, async): after build commands, remind to store results.
-/// Uses fast byte scan to detect build commands, then direct string output.
-fn post_build(input: &str) -> Result<String, String> {
-    // Fast-path: scan for build keywords in raw JSON without parsing
+/// PostToolUse(Bash, async): after build commands, track build state in session.
+/// v10: Only remind on failure — successful builds are silent.
+fn post_build(input: &str, dir: &Path) -> Result<String, String> {
     let is_build = (input.contains("xcodebuild") && input.contains("build"))
         || input.contains("cargo build") || input.contains("swift build")
         || input.contains("swiftc ");
     if !is_build { return Ok(String::new()); }
-    // Static response — no Value allocation needed
-    Ok(POST_BUILD_RESPONSE.into())
+
+    // Detect build failure vs success from output
+    let has_error = input.contains("error:") || input.contains("BUILD FAILED")
+        || input.contains("error[E") || input.contains("error: could not compile");
+    let has_success = input.contains("Build Succeeded") || input.contains("Finished")
+        || input.contains("BUILD SUCCEEDED") || input.contains("Compiling ");
+
+    // Extract first few error lines for session state
+    let mut errors = Vec::new();
+    if has_error {
+        // Find "stdout" or "stderr" field content and extract error lines
+        for line in input.lines() {
+            let trimmed = line.trim();
+            if (trimmed.contains("error:") || trimmed.contains("error[E"))
+                && !trimmed.contains("generated") && errors.len() < 5
+            {
+                // Clean up the error line (strip JSON escaping artifacts)
+                let clean = trimmed.replace("\\n", "").replace("\\\"", "\"");
+                if clean.len() > 10 && clean.len() < 300 {
+                    errors.push(clean);
+                }
+            }
+        }
+    }
+
+    let build_ok = !has_error || (has_success && !has_error);
+
+    // Update session with build state
+    let mut session = crate::session::Session::load_or_new(dir);
+    session.record_build(build_ok, errors);
+    session.record_tool("Bash");
+    session.save(dir).ok();
+
+    // Only remind on failure — successful builds are quiet
+    if build_ok {
+        Ok(String::new())
+    } else {
+        Ok(POST_BUILD_FAIL_RESPONSE.into())
+    }
 }
 
-const POST_BUILD_RESPONSE: &str = r#"{"systemMessage":"BUILD COMPLETED. If the build failed with a non-obvious error, store the root cause in amaranthine (topic: build-gotchas). If it succeeded after fixing an issue, store what fixed it."}"#;
+const POST_BUILD_FAIL_RESPONSE: &str = r#"{"systemMessage":"BUILD FAILED. Store the root cause in amaranthine (topic: build-gotchas) if the error was non-obvious. Check session state for extracted errors."}"#;
 
-/// Stop: remind to store findings before conversation ends.
-fn stop() -> Result<String, String> {
+/// Stop: flush pending notes from session, remind to store findings.
+/// v10: Session-aware — includes session summary in stop message.
+fn stop(dir: &Path) -> Result<String, String> {
     let stamp = "/tmp/amaranthine-hook-stop.last";
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -172,7 +229,46 @@ fn stop() -> Result<String, String> {
         }
     }
     std::fs::write(stamp, now.to_string()).ok();
-    Ok(hook_output("STOPPING: Store any non-obvious findings in amaranthine before ending."))
+
+    // Load session for summary
+    let session = crate::session::Session::load(dir);
+    let mut msg = String::with_capacity(256);
+    msg.push_str("STOPPING: Store any non-obvious findings in amaranthine before ending.");
+
+    if let Some(s) = &session {
+        let duration_min = now.saturating_sub(s.started) / 60;
+        let files_edited = s.files.iter()
+            .filter(|f| matches!(f.op, crate::session::FileOp::Edited | crate::session::FileOp::Created))
+            .count();
+        let entries_injected = s.injected.len();
+
+        {
+            msg.push_str(" Session: ");
+            push_u64_str(&mut msg, duration_min);
+            msg.push_str("min, ");
+            push_u64_str(&mut msg, files_edited as u64);
+            msg.push_str(" files changed, ");
+            push_u64_str(&mut msg, entries_injected as u64);
+            msg.push_str(" entries injected, phase=");
+            msg.push_str(s.phase.as_str());
+            msg.push('.');
+        }
+
+        if !s.pending_notes.is_empty() {
+            msg.push_str(" PENDING NOTES TO STORE: ");
+            for (i, note) in s.pending_notes.iter().enumerate() {
+                if i > 0 { msg.push_str("; "); }
+                msg.push_str(note);
+            }
+        }
+    }
+
+    Ok(hook_output(&msg))
+}
+
+fn push_u64_str(buf: &mut String, n: u64) {
+    use std::fmt::Write;
+    write!(buf, "{n}").unwrap();
 }
 
 /// SubagentStart: inject dynamic topic list from index.
@@ -231,9 +327,8 @@ pub fn extract_removed_syms(input: &crate::json::Value, stem: &str) -> Vec<Strin
     removed
 }
 
-/// Smart Ambient Context: multi-layer search with deduplication.
-/// v7.3: source-path matching, symbol extraction from file, topic affinity.
-/// v7.4: LRU symbol cache, adaptive Layer 2 skip, batch output collection.
+/// Smart Ambient Context: multi-layer search with cross-invocation deduplication.
+/// v10.1: Unified function — Option<Session> for session dedup + auto-focus topics.
 ///
 /// Layers (each deduplicates against all prior via FxHashSet<u32>):
 ///   1. Source-path matches — entries with [source:] metadata for this file
@@ -242,35 +337,46 @@ pub fn extract_removed_syms(input: &crate::json::Value, stem: &str) -> Vec<Strin
 ///   4. Structural coupling — "structural <stem>" query
 ///   5. Refactor impact — removed symbols (Edit only)
 ///
-/// Adaptive skip: Layer 2 skipped when Layer 1 returns 5+ hits (source metadata
-/// is higher precision than symbol extraction, and the file read is the main cost).
-/// LRU cache: Layer 2 symbol extraction cached at /tmp/amr-sym-cache keyed on
-/// (path, mtime) — eliminates file read + parse on sequential Read→Edit of same file.
-pub fn query_ambient(data: &[u8], stem: &str, file_path: &str, syms: &[&str]) -> String {
+/// When session=Some: skips entries already injected this session, marks new ones,
+/// and auto-infers focus topics from entry topic names (3+ hits threshold).
+pub fn query_ambient(
+    data: &[u8], stem: &str, file_path: &str, syms: &[&str],
+    session: Option<&mut crate::session::Session>,
+) -> String {
     let filename = std::path::Path::new(file_path)
         .file_name().and_then(|f| f.to_str()).unwrap_or(stem);
     let mut seen = crate::fxhash::FxHashSet::default();
-
-    // Batch collection: all snippets go into a flat pool, with per-layer counts.
-    // Single output pass at the end builds the string with pre-calculated capacity.
-    // v7.4: Cow<str> — Layer 1 borrows from mmap (zero alloc), layers 2-5 own from SearchHit.
+    let mut entry_ids: Vec<u32> = Vec::with_capacity(32);
     let mut snippet_pool: Vec<std::borrow::Cow<str>> = Vec::with_capacity(32);
 
-    // Layer 1: Source-path matches — entries explicitly about this file
-    // v7.4: entry_snippet_ref borrows directly from mmap data — zero String allocation.
+    // Snapshot session injected set for dedup (immutable borrow)
+    let injected_snapshot: Option<crate::fxhash::FxHashSet<u32>> = session.as_ref()
+        .map(|s| s.injected.clone());
+
+    // Dedup: local seen set + session injected (if available)
+    let mut check_add = |eid: u32| -> bool {
+        if let Some(ref inj) = injected_snapshot {
+            if inj.contains(&eid) { return false; }
+        }
+        seen.insert(eid)
+    };
+
+    // Layer 1: Source-path matches
     let source_ids = crate::binquery::source_entries_for_file(data, filename).unwrap_or_default();
     let l1_start = snippet_pool.len();
     for &eid in &source_ids {
-        seen.insert(eid);
-        if let Ok(snip) = crate::binquery::entry_snippet_ref(data, eid) {
-            if !snip.is_empty() { snippet_pool.push(std::borrow::Cow::Borrowed(snip)); }
+        if check_add(eid) {
+            if let Ok(snip) = crate::binquery::entry_snippet_ref(data, eid) {
+                if !snip.is_empty() {
+                    snippet_pool.push(std::borrow::Cow::Borrowed(snip));
+                    entry_ids.push(eid);
+                }
+            }
         }
     }
     let l1_count = snippet_pool.len() - l1_start;
 
     // Layer 2: Symbol-based search — skip if Layer 1 already provided enough context.
-    // Source-linked entries are higher precision (explicit metadata), so when we have 5+,
-    // the file read + symbol extraction + BM25 search is wasted work.
     let l2_start = snippet_pool.len();
     if source_ids.len() < 5 {
         let file_symbols = cached_file_symbols(file_path);
@@ -281,8 +387,9 @@ pub fn query_ambient(data: &[u8], stem: &str, file_path: &str, syms: &[&str]) ->
                 let hits = crate::binquery::search_v2_or(data, &query, &filter, 8)
                     .unwrap_or_default();
                 for h in hits {
-                    if seen.insert(h.entry_id) {
+                    if check_add(h.entry_id) {
                         snippet_pool.push(std::borrow::Cow::Owned(h.snippet));
+                        entry_ids.push(h.entry_id);
                         if snippet_pool.len() - l2_start >= 5 { break; }
                     }
                 }
@@ -295,8 +402,9 @@ pub fn query_ambient(data: &[u8], stem: &str, file_path: &str, syms: &[&str]) ->
     let l3_start = snippet_pool.len();
     let global = crate::binquery::search_v2(data, stem, 5).unwrap_or_default();
     for h in global {
-        if seen.insert(h.entry_id) {
+        if check_add(h.entry_id) {
             snippet_pool.push(std::borrow::Cow::Owned(h.snippet));
+            entry_ids.push(h.entry_id);
             if snippet_pool.len() - l3_start >= 3 { break; }
         }
     }
@@ -319,7 +427,10 @@ pub fn query_ambient(data: &[u8], stem: &str, file_path: &str, syms: &[&str]) ->
         crate::binquery::search_v2(data, &sq, 3).unwrap_or_default()
     };
     for h in structural {
-        if seen.insert(h.entry_id) { snippet_pool.push(std::borrow::Cow::Owned(h.snippet)); }
+        if check_add(h.entry_id) {
+            snippet_pool.push(std::borrow::Cow::Owned(h.snippet));
+            entry_ids.push(h.entry_id);
+        }
     }
     let l4_count = snippet_pool.len() - l4_start;
 
@@ -329,7 +440,10 @@ pub fn query_ambient(data: &[u8], stem: &str, file_path: &str, syms: &[&str]) ->
         for sym in syms {
             let hits = crate::binquery::search_v2(data, sym, 3).unwrap_or_default();
             for hit in hits {
-                if seen.insert(hit.entry_id) { snippet_pool.push(std::borrow::Cow::Owned(hit.snippet)); }
+                if check_add(hit.entry_id) {
+                    snippet_pool.push(std::borrow::Cow::Owned(hit.snippet));
+                    entry_ids.push(hit.entry_id);
+                }
             }
         }
     }
@@ -337,8 +451,29 @@ pub fn query_ambient(data: &[u8], stem: &str, file_path: &str, syms: &[&str]) ->
 
     if snippet_pool.is_empty() { return String::new(); }
 
-    // Single output pass: build from sections + snippet_pool.
-    // Pre-calculate capacity: ~80 bytes per snippet + headers + separators.
+    // Session bookkeeping: mark injected + auto-infer focus topics
+    drop(check_add);
+    if let Some(session) = session {
+        for &eid in &entry_ids {
+            session.mark_injected(eid);
+        }
+        // Auto-infer focus topics: count hits per topic, add topics with 3+ hits
+        let mut topic_counts: crate::fxhash::FxHashMap<u16, u16> = crate::fxhash::map_with_capacity(8);
+        for &eid in &entry_ids {
+            if let Ok(tid) = crate::binquery::entry_topic_id(data, eid) {
+                *topic_counts.entry(tid).or_insert(0) += 1;
+            }
+        }
+        for (&tid, &count) in &topic_counts {
+            if count >= 3 {
+                if let Ok(name) = crate::binquery::topic_name(data, tid) {
+                    session.add_focus_topic(&name);
+                }
+            }
+        }
+    }
+
+    // Single output pass
     let est_cap = snippet_pool.iter().map(|s| s.len() + 4).sum::<usize>() + 5 * 40;
     let mut out = String::with_capacity(est_cap);
 
@@ -349,7 +484,6 @@ pub fn query_ambient(data: &[u8], stem: &str, file_path: &str, syms: &[&str]) ->
         if count == 0 { continue; }
         if !out.is_empty() { out.push_str("---\n"); }
 
-        // Section header
         match i {
             0 => { out.push_str("source-linked ("); out.push_str(filename); out.push_str("):\n"); }
             2 => { out.push_str("related ("); out.push_str(stem); out.push_str("):\n"); }
@@ -364,7 +498,6 @@ pub fn query_ambient(data: &[u8], stem: &str, file_path: &str, syms: &[&str]) ->
             _ => { out.push_str(labels[i]); out.push_str(":\n"); }
         }
 
-        // Section entries
         for _ in 0..count {
             out.push_str("  ");
             out.push_str(&snippet_pool[pool_idx]);
