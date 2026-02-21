@@ -233,78 +233,77 @@ pub fn extract_removed_syms(input: &crate::json::Value, stem: &str) -> Vec<Strin
 
 /// Smart Ambient Context: multi-layer search with deduplication.
 /// v7.3: source-path matching, symbol extraction from file, topic affinity.
-/// Layer 1: Source-path matches (entries with [source: ...filename...])
-/// Layer 2: Symbol-based OR search (symbols extracted from file content)
-/// Layer 3: Global BM25 search (existing stem search, capped)
-/// Layer 4: Structural coupling (existing)
-/// Layer 5: Refactor impact (existing, Edit only)
+/// v7.4: LRU symbol cache, adaptive Layer 2 skip, batch output collection.
+///
+/// Layers (each deduplicates against all prior via FxHashSet<u32>):
+///   1. Source-path matches — entries with [source:] metadata for this file
+///   2. Symbol-based OR search — fn/struct/enum names extracted from file
+///   3. Global BM25 search — stem keyword
+///   4. Structural coupling — "structural <stem>" query
+///   5. Refactor impact — removed symbols (Edit only)
+///
+/// Adaptive skip: Layer 2 skipped when Layer 1 returns 5+ hits (source metadata
+/// is higher precision than symbol extraction, and the file read is the main cost).
+/// LRU cache: Layer 2 symbol extraction cached at /tmp/amr-sym-cache keyed on
+/// (path, mtime) — eliminates file read + parse on sequential Read→Edit of same file.
 pub fn query_ambient(data: &[u8], stem: &str, file_path: &str, syms: &[&str]) -> String {
     let filename = std::path::Path::new(file_path)
         .file_name().and_then(|f| f.to_str()).unwrap_or(stem);
     let mut seen = crate::fxhash::FxHashSet::default();
-    let mut out = String::new();
+
+    // Batch collection: all snippets go into a flat pool, with per-layer counts.
+    // Single output pass at the end builds the string with pre-calculated capacity.
+    // v7.4: Cow<str> — Layer 1 borrows from mmap (zero alloc), layers 2-5 own from SearchHit.
+    let mut snippet_pool: Vec<std::borrow::Cow<str>> = Vec::with_capacity(32);
 
     // Layer 1: Source-path matches — entries explicitly about this file
+    // v7.4: entry_snippet_ref borrows directly from mmap data — zero String allocation.
     let source_ids = crate::binquery::source_entries_for_file(data, filename).unwrap_or_default();
-    if !source_ids.is_empty() {
-        out.push_str("source-linked (");
-        out.push_str(filename);
-        out.push_str("):\n");
-        for &eid in &source_ids {
-            seen.insert(eid);
-            if let Ok(snip) = crate::binquery::entry_snippet(data, eid) {
-                if !snip.is_empty() {
-                    out.push_str("  ");
-                    out.push_str(&snip);
-                    out.push('\n');
-                }
-            }
+    let l1_start = snippet_pool.len();
+    for &eid in &source_ids {
+        seen.insert(eid);
+        if let Ok(snip) = crate::binquery::entry_snippet_ref(data, eid) {
+            if !snip.is_empty() { snippet_pool.push(std::borrow::Cow::Borrowed(snip)); }
         }
     }
+    let l1_count = snippet_pool.len() - l1_start;
 
-    // Layer 2: Symbol-based search — extract fn/struct/enum names from file, OR-search
-    let file_symbols = extract_file_symbols(file_path);
-    if !file_symbols.is_empty() {
-        let query = build_symbol_query(&file_symbols, stem);
-        if !query.is_empty() {
-            let filter = crate::binquery::FilterPred::none();
-            let hits = crate::binquery::search_v2_or(data, &query, &filter, 8)
-                .unwrap_or_default();
-            let new_hits: Vec<_> = hits.into_iter()
-                .filter(|h| seen.insert(h.entry_id))
-                .take(5)
-                .collect();
-            if !new_hits.is_empty() {
-                if !out.is_empty() { out.push_str("---\n"); }
-                out.push_str("symbol context:\n");
-                for hit in &new_hits {
-                    out.push_str("  ");
-                    out.push_str(&hit.snippet);
-                    out.push('\n');
+    // Layer 2: Symbol-based search — skip if Layer 1 already provided enough context.
+    // Source-linked entries are higher precision (explicit metadata), so when we have 5+,
+    // the file read + symbol extraction + BM25 search is wasted work.
+    let l2_start = snippet_pool.len();
+    if source_ids.len() < 5 {
+        let file_symbols = cached_file_symbols(file_path);
+        if !file_symbols.is_empty() {
+            let query = build_symbol_query(&file_symbols, stem);
+            if !query.is_empty() {
+                let filter = crate::binquery::FilterPred::none();
+                let hits = crate::binquery::search_v2_or(data, &query, &filter, 8)
+                    .unwrap_or_default();
+                for h in hits {
+                    if seen.insert(h.entry_id) {
+                        snippet_pool.push(std::borrow::Cow::Owned(h.snippet));
+                        if snippet_pool.len() - l2_start >= 5 { break; }
+                    }
                 }
             }
         }
     }
+    let l2_count = snippet_pool.len() - l2_start;
 
     // Layer 3: Global BM25 search (stem keyword)
+    let l3_start = snippet_pool.len();
     let global = crate::binquery::search_v2(data, stem, 5).unwrap_or_default();
-    let global_new: Vec<_> = global.into_iter()
-        .filter(|h| seen.insert(h.entry_id))
-        .take(3)
-        .collect();
-    if !global_new.is_empty() {
-        if !out.is_empty() { out.push_str("---\n"); }
-        out.push_str("related (");
-        out.push_str(stem);
-        out.push_str("):\n");
-        for hit in &global_new {
-            out.push_str("  ");
-            out.push_str(&hit.snippet);
-            out.push('\n');
+    for h in global {
+        if seen.insert(h.entry_id) {
+            snippet_pool.push(std::borrow::Cow::Owned(h.snippet));
+            if snippet_pool.len() - l3_start >= 3 { break; }
         }
     }
+    let l3_count = snippet_pool.len() - l3_start;
 
     // Layer 4: Structural coupling
+    let l4_start = snippet_pool.len();
     let mut sq_buf = [0u8; 128];
     let sq_prefix = b"structural ";
     let sq_len = sq_prefix.len() + stem.len();
@@ -319,43 +318,58 @@ pub fn query_ambient(data: &[u8], stem: &str, file_path: &str, syms: &[&str]) ->
         sq.push_str(stem);
         crate::binquery::search_v2(data, &sq, 3).unwrap_or_default()
     };
-    let structural_new: Vec<_> = structural.into_iter()
-        .filter(|h| seen.insert(h.entry_id))
-        .collect();
-    if !structural_new.is_empty() {
-        if !out.is_empty() { out.push_str("---\n"); }
-        out.push_str("structural coupling:\n");
-        for hit in &structural_new {
-            out.push_str("  ");
-            out.push_str(&hit.snippet);
-            out.push('\n');
-        }
+    for h in structural {
+        if seen.insert(h.entry_id) { snippet_pool.push(std::borrow::Cow::Owned(h.snippet)); }
     }
+    let l4_count = snippet_pool.len() - l4_start;
 
     // Layer 5: Refactor impact (Edit only)
+    let l5_start = snippet_pool.len();
     if !syms.is_empty() {
-        let mut refactor = String::new();
-        refactor.push_str("REFACTOR IMPACT (symbols modified: ");
-        for (i, sym) in syms.iter().enumerate() {
-            if i > 0 { refactor.push_str(", "); }
-            refactor.push_str(sym);
-        }
-        refactor.push_str("):\n");
-        let mut has_hits = false;
         for sym in syms {
             let hits = crate::binquery::search_v2(data, sym, 3).unwrap_or_default();
             for hit in hits {
-                if seen.insert(hit.entry_id) {
-                    refactor.push_str("  ");
-                    refactor.push_str(&hit.snippet);
-                    refactor.push('\n');
-                    has_hits = true;
-                }
+                if seen.insert(hit.entry_id) { snippet_pool.push(std::borrow::Cow::Owned(hit.snippet)); }
             }
         }
-        if has_hits {
-            if !out.is_empty() { out.push_str("---\n"); }
-            out.push_str(&refactor);
+    }
+    let l5_count = snippet_pool.len() - l5_start;
+
+    if snippet_pool.is_empty() { return String::new(); }
+
+    // Single output pass: build from sections + snippet_pool.
+    // Pre-calculate capacity: ~80 bytes per snippet + headers + separators.
+    let est_cap = snippet_pool.iter().map(|s| s.len() + 4).sum::<usize>() + 5 * 40;
+    let mut out = String::with_capacity(est_cap);
+
+    let counts = [l1_count, l2_count, l3_count, l4_count, l5_count];
+    let labels = ["source-linked", "symbol context", "related", "structural coupling", "REFACTOR IMPACT"];
+    let mut pool_idx = 0;
+    for (i, &count) in counts.iter().enumerate() {
+        if count == 0 { continue; }
+        if !out.is_empty() { out.push_str("---\n"); }
+
+        // Section header
+        match i {
+            0 => { out.push_str("source-linked ("); out.push_str(filename); out.push_str("):\n"); }
+            2 => { out.push_str("related ("); out.push_str(stem); out.push_str("):\n"); }
+            4 => {
+                out.push_str("REFACTOR IMPACT (symbols modified: ");
+                for (j, sym) in syms.iter().enumerate() {
+                    if j > 0 { out.push_str(", "); }
+                    out.push_str(sym);
+                }
+                out.push_str("):\n");
+            }
+            _ => { out.push_str(labels[i]); out.push_str(":\n"); }
+        }
+
+        // Section entries
+        for _ in 0..count {
+            out.push_str("  ");
+            out.push_str(&snippet_pool[pool_idx]);
+            out.push('\n');
+            pool_idx += 1;
         }
     }
 
@@ -406,6 +420,56 @@ fn extract_file_symbols(path: &str) -> Vec<String> {
     symbols.dedup();
     symbols.truncate(20);
     symbols
+}
+
+/// 1-entry LRU symbol cache: filesystem-based, persists across hook invocations.
+/// Cache hit avoids file read + parse (~0.8ms savings per invocation).
+/// Keyed on (path, mtime_secs) — auto-invalidates when file is modified.
+const SYM_CACHE_PATH: &str = "/tmp/amr-sym-cache";
+
+fn cached_file_symbols(path: &str) -> Vec<String> {
+    let mtime = match std::fs::metadata(path) {
+        Ok(m) => m.modified().ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs()).unwrap_or(0),
+        Err(_) => return vec![],
+    };
+
+    // Cache hit: path + mtime match → return cached symbols
+    if let Ok(cache) = std::fs::read_to_string(SYM_CACHE_PATH) {
+        let mut lines = cache.lines();
+        if let (Some(cp), Some(cm)) = (lines.next(), lines.next()) {
+            if cp == path {
+                if let Ok(cached_mt) = cm.parse::<u64>() {
+                    if cached_mt == mtime {
+                        return lines.map(|l| l.to_string()).collect();
+                    }
+                }
+            }
+        }
+    }
+
+    // Cache miss: extract, write cache, return
+    let syms = extract_file_symbols(path);
+    let mut buf = String::with_capacity(path.len() + 32 + syms.len() * 20);
+    buf.push_str(path);
+    buf.push('\n');
+    itoa_push_u64(&mut buf, mtime);
+    for sym in &syms {
+        buf.push('\n');
+        buf.push_str(sym);
+    }
+    std::fs::write(SYM_CACHE_PATH, buf.as_bytes()).ok();
+    syms
+}
+
+fn itoa_push_u64(buf: &mut String, n: u64) {
+    if n == 0 { buf.push('0'); return; }
+    let mut digits = [0u8; 20];
+    let mut i = 0;
+    let mut v = n;
+    while v > 0 { digits[i] = b'0' + (v % 10) as u8; v /= 10; i += 1; }
+    while i > 0 { i -= 1; buf.push(digits[i] as char); }
 }
 
 /// Build a search query from extracted symbols.

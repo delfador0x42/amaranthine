@@ -153,10 +153,38 @@ pub fn stats() -> CacheStats {
 }
 
 /// Build index snippet: "[topic] date content_preview". Computed once, reused by rebuild.
+/// v7.4: single allocation — direct push_str replaces format! + Vec + join (was 4 allocs).
 fn build_snippet(topic: &str, ts_min: i32, body: &str) -> String {
-    let date = crate::time::minutes_to_date_str(ts_min);
-    let lines: Vec<&str> = body.lines()
-        .filter(|l| !crate::text::is_metadata_line(l) && !l.trim().is_empty())
-        .take(2).collect();
-    format!("[{}] {} {}", topic, date, crate::text::truncate(&lines.join(" "), 120))
+    // Pre-size: "[topic] YYYY-MM-DD HH:MM " + ~120 chars content
+    let mut buf = String::with_capacity(topic.len() + 20 + 120);
+    buf.push('[');
+    buf.push_str(topic);
+    buf.push_str("] ");
+    crate::time::minutes_to_date_str_into(ts_min, &mut buf);
+    buf.push(' ');
+    // Inline content preview: take first 2 non-metadata, non-empty lines joined by space
+    let content_start = buf.len();
+    let mut line_count = 0u8;
+    for line in body.lines() {
+        if crate::text::is_metadata_line(line) || line.trim().is_empty() { continue; }
+        if line_count > 0 { buf.push(' '); }
+        buf.push_str(line.trim());
+        line_count += 1;
+        if line_count >= 2 { break; }
+        // Cap content at ~120 chars
+        if buf.len() - content_start >= 120 { break; }
+    }
+    // Truncate content portion to ~120 bytes at a word boundary (char-safe).
+    let content_len = buf.len() - content_start;
+    if content_len > 120 {
+        // Find the largest char boundary <= 120
+        let mut boundary = 120;
+        while boundary > 0 && !buf.is_char_boundary(content_start + boundary) {
+            boundary -= 1;
+        }
+        let content = &buf[content_start..content_start + boundary];
+        let trunc_at = content.rfind(' ').unwrap_or(boundary);
+        buf.truncate(content_start + trunc_at);
+    }
+    buf
 }

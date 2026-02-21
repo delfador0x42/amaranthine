@@ -131,22 +131,7 @@ fn handle_ambient_fast(line: &str) -> String {
     }).unwrap_or_default()
 }
 
-/// Fast integer-to-string push without format!(). Handles 0-65535 (u16 range).
-fn itoa_push(buf: &mut String, n: u32) {
-    if n == 0 { buf.push('0'); return; }
-    let mut digits = [0u8; 10];
-    let mut i = 0;
-    let mut v = n;
-    while v > 0 {
-        digits[i] = b'0' + (v % 10) as u8;
-        v /= 10;
-        i += 1;
-    }
-    while i > 0 {
-        i -= 1;
-        buf.push(digits[i] as char);
-    }
-}
+fn itoa_push(buf: &mut String, n: u32) { crate::text::itoa_push(buf, n); }
 
 /// Extract string array from "syms":["a","b","c"] without full JSON parse.
 fn extract_syms_array(line: &str) -> Vec<&str> {

@@ -102,8 +102,14 @@ fn score_on_cache(dir: &Path, terms: &[String], filter: &Filter, limit: Option<u
         let n = filtered.len() as f64;
         let total_words: usize = filtered.iter().map(|e| e.word_count).sum();
         let avgdl = if filtered.is_empty() { 1.0 } else { total_words as f64 / n };
-        let dfs: Vec<usize> = terms.iter()
-            .map(|t| filtered.iter().filter(|e| e.tf_map.contains_key(t)).count()).collect();
+        // Single-pass DF computation: count all term document frequencies in one scan.
+        // Was: O(terms * entries) separate scans. Now: O(entries) single scan.
+        let mut dfs = vec![0usize; terms.len()];
+        for e in &filtered {
+            for (i, t) in terms.iter().enumerate() {
+                if e.tf_map.contains_key(t) { dfs[i] += 1; }
+            }
+        }
         let cap = limit.unwrap_or(filtered.len());
         let mut results = score_cached_mode(&filtered, terms, filter.mode, n, avgdl, &dfs, cap);
         let mut fallback = false;

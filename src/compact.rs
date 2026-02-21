@@ -11,10 +11,12 @@ pub fn run(dir: &Path, topic: &str, apply: bool) -> Result<String, String> {
         return Ok(format!("{topic}: {} entry, nothing to compact", entries.len()));
     }
 
+    // Pre-compute lowercase once per entry (not per pair) — saves N*(N-1)/2 allocations.
+    let lowers: Vec<String> = entries.iter().map(|e| e.body.to_lowercase()).collect();
     let mut pairs: Vec<(usize, usize, f64)> = Vec::new();
     for i in 0..entries.len() {
         for j in (i + 1)..entries.len() {
-            let sim = similarity(&entries[i].body, &entries[j].body);
+            let sim = similarity_precomputed(&lowers[i], &lowers[j]);
             if sim > 0.5 { pairs.push((i, j, sim)); }
         }
     }
@@ -59,9 +61,11 @@ pub fn scan(dir: &Path) -> Result<String, String> {
     let mut total_dupes = 0;
     for (name, group) in &topics {
         let mut dupes = 0;
+        // Pre-compute lowercase once per entry (not per pair).
+        let lowers: Vec<String> = group.iter().map(|e| e.body.to_lowercase()).collect();
         for i in 0..group.len() {
             for j in (i + 1)..group.len() {
-                if similarity(&group[i].body, &group[j].body) > 0.5 { dupes += 1; }
+                if similarity_precomputed(&lowers[i], &lowers[j]) > 0.5 { dupes += 1; }
             }
         }
         if dupes > 0 {
@@ -77,11 +81,10 @@ pub fn scan(dir: &Path) -> Result<String, String> {
     Ok(out)
 }
 
-fn similarity(a: &str, b: &str) -> f64 {
-    let al = a.to_lowercase();
-    let bl = b.to_lowercase();
-    let sa: std::collections::HashSet<&str> = al.split_whitespace().filter(|w| w.len() >= 4).collect();
-    let sb: std::collections::HashSet<&str> = bl.split_whitespace().filter(|w| w.len() >= 4).collect();
+/// Jaccard similarity on pre-lowercased bodies. FxHashSet (~3ns/hash) vs std::HashSet (~20ns/hash).
+fn similarity_precomputed(al: &str, bl: &str) -> f64 {
+    let sa: crate::fxhash::FxHashSet<&str> = al.split_whitespace().filter(|w| w.len() >= 4).collect();
+    let sb: crate::fxhash::FxHashSet<&str> = bl.split_whitespace().filter(|w| w.len() >= 4).collect();
     if sa.is_empty() || sb.is_empty() { return 0.0; }
     sa.intersection(&sb).count() as f64 / sa.len().min(sb.len()) as f64
 }

@@ -288,3 +288,14 @@ pub fn extract_tags(lines: &[impl AsRef<str>]) -> Option<String> {
     }
     None
 }
+
+/// Fast integer-to-string push without format!(). Handles full u32 range.
+/// Shared by binquery, sock, hook — was duplicated in 3 files.
+pub fn itoa_push(buf: &mut String, n: u32) {
+    if n == 0 { buf.push('0'); return; }
+    let mut digits = [0u8; 10];
+    let mut i = 0;
+    let mut v = n;
+    while v > 0 { digits[i] = b'0' + (v % 10) as u8; v /= 10; i += 1; }
+    while i > 0 { i -= 1; buf.push(digits[i] as char); }
+}

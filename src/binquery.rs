@@ -91,15 +91,7 @@ pub fn search(data: &[u8], query: &str, limit: usize) -> Result<String, String> 
     Ok(out)
 }
 
-/// Fast integer-to-string push without format!(). Handles full u32 range.
-fn itoa_push(buf: &mut String, n: u32) {
-    if n == 0 { buf.push('0'); return; }
-    let mut digits = [0u8; 10];
-    let mut i = 0;
-    let mut v = n;
-    while v > 0 { digits[i] = b'0' + (v % 10) as u8; v /= 10; i += 1; }
-    while i > 0 { i -= 1; buf.push(digits[i] as char); }
-}
+fn itoa_push(buf: &mut String, n: u32) { crate::text::itoa_push(buf, n); }
 
 // --- Structured search ---
 
@@ -133,7 +125,11 @@ pub fn search_v2_or(
 
 /// Lightweight heap entry for top-K selection — no snippet String allocation.
 /// v6.5: snippets extracted only for final K entries (deferred allocation).
-struct HeapHit { score: f64, entry_id: u32, topic_id: u16, date_minutes: i32, log_offset: u32 }
+/// v7.4: carries snippet_off/len from Phase 1 EntryMeta — avoids re-read in Phase 3.
+struct HeapHit {
+    score: f64, entry_id: u32, topic_id: u16, date_minutes: i32, log_offset: u32,
+    snippet_off: u32, snippet_len: u16,
+}
 impl PartialEq for HeapHit {
     fn eq(&self, other: &Self) -> bool { self.score.to_bits() == other.score.to_bits() }
 }
@@ -194,11 +190,16 @@ fn search_v2_core(
                 let p_off = { slot.postings_off } as usize;
                 let p_len = { slot.postings_len } as usize;
                 let base = post_off + p_off * std::mem::size_of::<Posting>();
+                // Validate postings range once, then use unchecked reads in inner loop.
+                let post_end = base + p_len * std::mem::size_of::<Posting>();
+                if post_end > data_len { break; }
+                let meta_size = std::mem::size_of::<EntryMeta>();
                 for i in 0..p_len {
-                    let p = read_at::<Posting>(data, base + i * std::mem::size_of::<Posting>())?;
+                    // Safety: post_end validated above, meta_end validated at line 164.
+                    let p: Posting = unsafe { read_at_unchecked(data, base + i * std::mem::size_of::<Posting>()) };
                     let eid = { p.entry_id } as usize;
                     if eid >= num_entries { continue; }
-                    let m = read_at::<EntryMeta>(data, meta_off + eid * std::mem::size_of::<EntryMeta>())?;
+                    let m: EntryMeta = unsafe { read_at_unchecked(data, meta_off + eid * meta_size) };
 
                     if !filter.passes(&m) { continue; }
 
@@ -257,6 +258,7 @@ fn search_v2_core(
         let hit = HeapHit {
             score, entry_id: eid as u32, topic_id: { m.topic_id },
             date_minutes: { m.date_minutes }, log_offset: { m.log_offset },
+            snippet_off: { m.snippet_off }, snippet_len: { m.snippet_len },
         };
 
         if heap.len() < limit {
@@ -272,12 +274,12 @@ fn search_v2_core(
     }
 
     // Phase 3: Extract snippets ONLY for final K entries — deferred allocation
+    // v7.4: snippet_off/len cached in HeapHit from Phase 2 — no EntryMeta re-read.
     let mut results: Vec<SearchHit> = Vec::with_capacity(heap.len());
     for r in heap.into_vec() {
         let h = r.0;
-        let m = read_at::<EntryMeta>(data, meta_off + h.entry_id as usize * std::mem::size_of::<EntryMeta>())?;
-        let so = snip_off + { m.snippet_off } as usize;
-        let sl = { m.snippet_len } as usize;
+        let so = snip_off + h.snippet_off as usize;
+        let sl = h.snippet_len as usize;
         let snippet = if so + sl <= data_len {
             std::str::from_utf8(&data[so..so + sl]).unwrap_or("").to_string()
         } else { String::new() };
@@ -428,12 +430,20 @@ pub fn reconstruct_tags(data: &[u8], entry_id: u32) -> Result<Option<String>, St
     let bitmap = { m.tag_bitmap };
     if bitmap == 0 { return Ok(None); }
     let tag_names = read_tag_names(data, &hdr)?;
-    let mut tags = Vec::new();
+    // Build "[tags: x, y, z]" without format!() — direct push_str.
+    let mut out = String::with_capacity(64);
+    out.push_str("[tags: ");
+    let mut first = true;
     for (bit, name) in tag_names.iter().enumerate() {
-        if bitmap & (1u32 << bit) != 0 { tags.push(name.as_str()); }
+        if bitmap & (1u32 << bit) != 0 {
+            if !first { out.push_str(", "); }
+            out.push_str(name);
+            first = false;
+        }
     }
-    if tags.is_empty() { return Ok(None); }
-    Ok(Some(format!("[tags: {}]", tags.join(", "))))
+    if first { return Ok(None); } // no tags matched
+    out.push(']');
+    Ok(Some(out))
 }
 
 /// Read all tag names from the tag_names section.
@@ -456,6 +466,12 @@ fn read_tag_names(data: &[u8], hdr: &Header) -> Result<Vec<String>, String> {
 
 /// Read snippet string for an entry directly from index.
 pub fn entry_snippet(data: &[u8], entry_id: u32) -> Result<String, String> {
+    entry_snippet_ref(data, entry_id).map(|s| s.to_string())
+}
+
+/// Borrow snippet directly from index data — zero allocation.
+/// Use when the caller doesn't need ownership (e.g. hook mmap path).
+pub fn entry_snippet_ref(data: &[u8], entry_id: u32) -> Result<&str, String> {
     let hdr = read_header(data)?;
     let meta_off = { hdr.meta_off } as usize;
     let snip_off = { hdr.snippet_off } as usize;
@@ -464,8 +480,8 @@ pub fn entry_snippet(data: &[u8], entry_id: u32) -> Result<String, String> {
     let m = read_at::<EntryMeta>(data, meta_off + entry_id as usize * std::mem::size_of::<EntryMeta>())?;
     let s_off = snip_off + { m.snippet_off } as usize;
     let s_len = { m.snippet_len } as usize;
-    if s_off + s_len > data.len() { return Ok(String::new()); }
-    Ok(std::str::from_utf8(&data[s_off..s_off + s_len]).unwrap_or("").to_string())
+    if s_off + s_len > data.len() { return Ok(""); }
+    Ok(std::str::from_utf8(&data[s_off..s_off + s_len]).unwrap_or(""))
 }
 
 pub fn entry_log_offset(data: &[u8], entry_id: u32) -> Result<u32, String> {
@@ -542,4 +558,11 @@ pub fn read_slot(data: &[u8], idx: usize) -> Result<TermSlot, String> {
 pub fn read_at<T: Copy>(data: &[u8], off: usize) -> Result<T, String> {
     if off + std::mem::size_of::<T>() > data.len() { return Err("read out of bounds".into()); }
     Ok(unsafe { std::ptr::read_unaligned(data.as_ptr().add(off) as *const T) })
+}
+
+/// Unchecked read — caller MUST verify bounds before calling.
+/// Eliminates ~4000 branches per search in Phase 1 inner loop.
+#[inline(always)]
+unsafe fn read_at_unchecked<T: Copy>(data: &[u8], off: usize) -> T {
+    std::ptr::read_unaligned(data.as_ptr().add(off) as *const T)
 }

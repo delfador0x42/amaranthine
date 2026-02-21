@@ -356,4 +356,4 @@ pub(crate) fn ensure_index_fresh(dir: &Path) {
 }
 
 /// Pre-serialized initialize result — zero allocation, written directly to stdout.
-const INIT_RESULT: &str = r#"{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"amaranthine","version":"7.2.0"}}"#;
+const INIT_RESULT: &str = r#"{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"amaranthine","version":"7.6.0"}}"#;
