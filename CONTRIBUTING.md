@@ -31,102 +31,112 @@ This re-execs the server process with the new binary (no restart needed).
 
 ## Project Structure
 
-41 Rust files, ~7700 lines. One file, one job.
+44 Rust files, ~9,800 lines. One file, one job.
 
 ### Core Data Layer
 
 | File | Lines | What |
 |------|-------|------|
-| `datalog.rs` | ~200 | Append-only data log: read, write, compact, migrate. Single source of truth. |
+| `datalog.rs` | ~210 | Append-only data log: read, write, compact, migrate. Single source of truth. |
 | `format.rs` | ~90 | Binary index on-disk structs. All `#[repr(C, packed)]` for zero-copy access. |
-| `inverted.rs` | ~350 | Index builder: reads data.log, produces index.bin with BM25-ready postings. |
-| `binquery.rs` | ~250 | Index reader: pointer arithmetic on `&[u8]`, no heap alloc. ~200ns queries. |
-| `cache.rs` | ~160 | In-memory corpus cache with mtime invalidation. Pre-tokenized entries. |
+| `inverted.rs` | ~420 | Index builder: reads data.log, produces index.bin with BM25-ready postings. |
+| `binquery.rs` | ~570 | Index reader: 3-phase deferred snippets, ~200ns queries. |
+| `cache.rs` | ~190 | In-memory corpus cache with mtime invalidation. Pre-tokenized entries. |
 
 ### Search & Scoring
 
 | File | Lines | What |
 |------|-------|------|
-| `score.rs` | ~340 | BM25 scoring engine. AND-to-OR fallback, topic/tag boost, confidence weighting. |
+| `score.rs` | ~350 | BM25 scoring engine. AND-to-OR fallback, topic/tag boost, confidence weighting. |
 | `search.rs` | ~180 | Search output formatting: full, medium, brief, count, topics, grouped. |
-| `text.rs` | ~120 | Unified tokenizer: ASCII fast path, CamelCase/snake_case split, tag parser. |
+| `text.rs` | ~300 | Unified tokenizer: ASCII fast path, CamelCase/snake_case split, tag parser. |
 
 ### Write Path
 
 | File | Lines | What |
 |------|-------|------|
-| `store.rs` | ~170 | Entry creation with Jaccard dedup, confidence, links, source provenance. |
-| `edit.rs` | ~180 | Entry modification: update, append, tag operations. All append+tombstone. |
-| `delete.rs` | ~100 | Entry/topic deletion via tombstone records. |
+| `store.rs` | ~285 | Entry creation with Jaccard dedup, auto-tags, confidence, links, source. |
+| `edit.rs` | ~175 | Entry modification: update, append, tag operations. All append+tombstone. |
+| `delete.rs` | ~96 | Entry/topic deletion via tombstone records. |
 
 ### Compression & Synthesis
 
 | File | Lines | What |
 |------|-------|------|
-| `compress.rs` | ~130 | Cross-topic dedup + temporal chain detection. |
-| `briefing.rs` | ~100 | Compressed briefing formatter: tag-categorized, hierarchical output. |
-| `reconstruct.rs` | ~80 | One-shot synthesis: primary topics + related entries + link following. |
+| `compress.rs` | ~280 | Cross-topic dedup + Jaccard similarity chains + temporal chains. |
+| `briefing.rs` | ~570 | 3-pass category classification, format_summary, body-keyword rescue. |
+| `reconstruct.rs` | ~200 | One-shot synthesis: topic matching + link following + glob patterns. |
+
+### Codebase Analysis
+
+| File | Lines | What |
+|------|-------|------|
+| `callgraph.rs` | ~175 | Trace function callers/callees with configurable depth. |
+| `codepath.rs` | ~180 | Find access sites for a pattern with context lines. |
+| `reverse.rs` | ~410 | Architecture mapping: module relationships, exports, coupling. |
+| `crash.rs` | ~230 | Stack frame parsing + crash pattern matching to source. |
+| `perf.rs` | ~220 | Callgraph + allocation/lock/I/O antipattern detection. |
 
 ### MCP Server
 
 | File | Lines | What |
 |------|-------|------|
-| `mcp.rs` | ~200 | JSON-RPC stdio loop, startup, state management. |
-| `mcp/tools.rs` | ~230 | 37 tool schema definitions. |
-| `mcp/dispatch.rs` | ~380 | Tool call routing, argument extraction, filter building. |
+| `mcp.rs` | ~430 | JSON-RPC stdio loop, index management, audit on reload. |
+| `mcp/tools.rs` | ~230 | 26 tool schema definitions. |
+| `mcp/dispatch.rs` | ~500 | Tool call routing, argument extraction, filter building. |
 
 ### Browse & Stats
 
 | File | Lines | What |
 |------|-------|------|
-| `topics.rs` | ~130 | Topic listing, recent entries, preview formatting. |
-| `context.rs` | ~50 | Session briefing: topics + recent + optional search. |
-| `digest.rs` | ~45 | One-bullet-per-entry summaries. |
-| `stats.rs` | ~170 | Statistics, staleness checking, refresh_stale. |
-| `export.rs` | ~80 | JSON export/import. |
-| `xref.rs` | ~60 | Cross-reference finder. |
-| `depgraph.rs` | ~65 | Topic dependency graph from body text mentions. |
-| `codepath.rs` | ~130 | Codebase coupling analysis (grep + categorize). |
+| `topics.rs` | ~135 | Topic listing, recent entries, preview formatting. |
+| `context.rs` | ~97 | Session briefing: activity-weighted topics + velocity. |
+| `digest.rs` | ~32 | One-bullet-per-entry summaries. |
+| `stats.rs` | ~220 | Statistics, tag listing, index health. |
+| `export.rs` | ~80 | JSON export/import with timestamp preservation. |
+| `xref.rs` | ~95 | Cross-reference finder. |
+| `depgraph.rs` | ~170 | Topic dependency graph with glob filtering. |
 
 ### Infrastructure
 
 | File | Lines | What |
 |------|-------|------|
-| `json.rs` | ~300 | Recursive descent JSON parser + pretty printer. `Num(f64)` for floats. |
-| `fxhash.rs` | ~50 | Non-cryptographic hasher: multiply-rotate, ~3ns/op. |
-| `intern.rs` | ~70 | `InternedStr`: Arc<str> newtype. O(1) clone for topic names. |
-| `time.rs` | ~50 | Date math: minutes-since-epoch, formatting, parsing. |
-| `config.rs` | ~120 | Directory resolution, path sanitization, source path resolution. |
-| `lock.rs` | ~30 | Unix `flock()` for write serialization. |
-| `compact.rs` | ~70 | Duplicate detection within topics. |
+| `json.rs` | ~405 | Recursive descent JSON parser + fast-path strings + escape_into. |
+| `fxhash.rs` | ~82 | Word-at-a-time multiply-rotate hasher, ~3ns/op. |
+| `intern.rs` | ~77 | `InternedStr`: Arc<str> newtype. O(1) clone for topic names. |
+| `time.rs` | ~205 | Date math: minutes-since-epoch, relative dates, zero-format. |
+| `config.rs` | ~195 | Directory resolution, path sanitization, source path resolution. |
+| `lock.rs` | ~31 | Unix `flock()` for write serialization. |
+| `compact.rs` | ~115 | Duplicate detection within topics. |
 | `prune.rs` | ~40 | Stale topic flagging. |
-| `migrate.rs` | ~50 | Timestamp backfill for legacy entries. |
+| `migrate.rs` | ~40 | Timestamp backfill for legacy entries. |
 
 ### Entry Points
 
 | File | Lines | What |
 |------|-------|------|
-| `main.rs` | ~250 | CLI entry: arg parsing, subcommand dispatch, hook routing. |
-| `lib.rs` | ~190 | Library root: module declarations + C FFI exports. |
-| `cffi.rs` | ~110 | C FFI zero-alloc query path with generation counter. |
-| `hook.rs` | ~200 | Claude Code hook handlers: ambient, post-build, stop, subagent-start. |
-| `install.rs` | ~200 | Installer: binary copy, codesign, MCP config, hooks. |
+| `main.rs` | ~280 | CLI entry: arg parsing, subcommand dispatch, hook routing. |
+| `lib.rs` | ~200 | Library root: module declarations + C FFI exports. |
+| `cffi.rs` | ~125 | C FFI zero-alloc query path with generation counter. |
+| `hook.rs` | ~500 | Hook handlers: mmap ambient, post-build, stop, subagent-start. |
+| `sock.rs` | ~225 | Unix domain socket listener for hook queries. |
+| `install.rs` | ~195 | Installer: binary copy, codesign, MCP config, hooks. |
 
 ## Architecture: Three Access Tiers
 
 ```
 Tier 1: C FFI (~200ns)
-  cffi.rs → binquery.rs → format.rs structs on index.bin
+  cffi.rs -> binquery.rs -> format.rs structs on index.bin
   Zero allocation. Generation counter skips array zeroing.
-  Used by hooks for sub-millisecond context injection.
+  Hook mmap path bypasses socket for sub-millisecond context injection.
 
 Tier 2: MCP Server (~5ms)
-  mcp.rs → dispatch.rs → score.rs/search.rs → cache.rs → datalog.rs
-  JSON-RPC over stdio. 37 tools. In-process, no IPC to data.
+  mcp.rs -> dispatch.rs -> score.rs/search.rs -> cache.rs -> datalog.rs
+  JSON-RPC over stdio. 26 tools. In-process, no IPC to data.
   Used by the agent during sessions.
 
 Tier 3: CLI (~5ms)
-  main.rs → same paths as MCP
+  main.rs -> same paths as MCP
   Direct invocation. Used for manual queries and scripting.
 ```
 
@@ -136,20 +146,31 @@ Tier 3: CLI (~5ms)
 
 ```
 store(topic, text, tags?, confidence?, links?)
-  → build_body(): prepend metadata lines ([tags:], [source:], [confidence:], [links:])
-  → dupe check: 6-char word Jaccard at 90% threshold
-  → datalog::append_entry(): write to data.log
-  → inverted::ensure_index(): full rebuild of index.bin
-  → cache::invalidate(): clear corpus cache
+  -> build_body(): prepend metadata lines ([tags:], [source:], [confidence:], [links:])
+  -> dupe check: 6-char word Jaccard at 90% threshold
+  -> datalog::append_entry(): write to data.log
+  -> inverted::ensure_index(): full rebuild of index.bin
+  -> cache::invalidate(): clear corpus cache
 ```
 
 ### Read
 
 ```
 search(query, detail?, filter?)
-  → cache::with_corpus(): load entries (warm: 0us, cold: ~5ms)
-  → score::search_scored(): BM25 with topic boost + tag boost + confidence
-  → search::run_*(): format output per detail level
+  -> cache::with_corpus(): load entries (warm: 0us, cold: ~5ms)
+  -> score::search_scored(): BM25 with topic boost + tag boost + confidence
+  -> search::run_*(): format output per detail level
+```
+
+### Brief (One-Shot Reconstruction)
+
+```
+brief(query?)
+  -> identify topics by name match or glob pattern
+  -> collect related entries via token matching
+  -> follow narrative links one level deep
+  -> compress: Jaccard dedup + temporal chains + supersession
+  -> briefing: 3-pass classify + format_summary
 ```
 
 ### Index
@@ -185,7 +206,6 @@ Multiple lines are fine.
 
 1. **Define the schema** in `mcp/tools.rs`:
    ```rust
-   // In tool_list(), add:
    tool("my_tool", "Description of what it does.",
        &["required_param"],
        &[("required_param", "string", "What this param is"),
@@ -231,9 +251,10 @@ Changing these files has cascading effects:
 | `format.rs` | Must bump VERSION. Update `inverted.rs` (builder), `binquery.rs` (reader), `cffi.rs` (FFI). Not backward compatible. |
 | `datalog.rs` | Entry record format change breaks ALL existing data.log files. No migration path for header changes. |
 | `json.rs` | Used by mcp.rs, dispatch.rs, export.rs, install.rs, tools.rs, main.rs. `Value` enum changes cascade everywhere. |
-| `cache.rs` | `CachedEntry` struct used by score.rs, search.rs, reconstruct.rs, topics.rs, stats.rs, digest.rs, export.rs, xref.rs, depgraph.rs. Adding fields requires updating cache load in `with_corpus()`. |
+| `cache.rs` | `CachedEntry` struct used by score.rs, search.rs, reconstruct.rs, topics.rs, stats.rs, digest.rs, export.rs, xref.rs, depgraph.rs. Adding fields requires updating `with_corpus()`. |
 | `text.rs` | `tokenize()` and `query_terms()` affect both search paths (corpus BM25 and binary index). Changes alter what matches what. |
 | `score.rs` | `Filter` struct used by dispatch.rs, context.rs, reconstruct.rs. Adding a filter field requires updating `build_filter()` in dispatch.rs. |
+| `briefing.rs` | Categories and classification logic affect all `brief` output. Changes here change the mental model agents build. |
 
 ## Testing
 
@@ -243,10 +264,10 @@ There's no test suite yet (the codebase is tested via real usage). To verify cha
 # Build
 cargo build --release
 
-# Smoke test: store, search, reconstruct
+# Smoke test: store, search, brief
 ./target/release/amaranthine store test-topic "test entry" --tags test
 ./target/release/amaranthine search "test"
-./target/release/amaranthine call reconstruct query="test"
+./target/release/amaranthine call brief query="test"
 
 # Clean up
 ./target/release/amaranthine call delete topic="test-topic" all="true"
@@ -255,8 +276,10 @@ cargo build --release
 ## Style
 
 - Zero dependencies. If you need something, build it.
-- One file, one job. Target 100 lines, max 300.
+- One file, one job. Target 100 lines, max 300 (analysis files may go to ~600).
 - Simple over clever. If it needs a comment to explain a trick, simplify it.
 - `#[inline]` on functions called cross-module in hot paths.
 - `with_capacity` on all hot-path allocations.
 - Topics and tags are always lowercase (enforced at write time).
+- Zero `format!()` in hot paths — use `push_str` with pre-sized buffers.
+- FxHashSet/FxHashMap for all internal data structures (no DoS concern).

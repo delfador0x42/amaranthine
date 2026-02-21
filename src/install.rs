@@ -142,7 +142,7 @@ fn update_hooks(path: &Path, exe: &str) -> Result<(), String> {
         config.set("hooks", hooks);
     } else {
         let h = config.get_mut("hooks").unwrap();
-        h.set("PreToolUse", hook_entry(exe, "ambient", ""));
+        h.set("PreToolUse", hook_entry(exe, "ambient", "Read|Edit|Write"));
         h.set("PostToolUse", hook_entry(exe, "post-build", "Bash"));
         h.set("Stop", hook_entry(exe, "stop", ""));
         h.set("SubagentStart", hook_entry(exe, "subagent-start", ""));
