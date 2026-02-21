@@ -6,13 +6,49 @@ use std::fmt::Write;
 use std::path::Path;
 
 pub fn run(dir: &Path) -> Result<String, String> {
-    // Try index path first (pre-computed xrefs)
-    if let Some(result) = run_via_index(dir) { return Ok(result); }
-    // Fallback: corpus scan with token_set matching
-    run_via_corpus(dir)
+    run_filtered(dir, None)
 }
 
-fn run_via_index(dir: &Path) -> Option<String> {
+pub fn run_focused(dir: &Path, focus: &str) -> Result<String, String> {
+    run_filtered(dir, Some(focus))
+}
+
+fn run_filtered(dir: &Path, focus: Option<&str>) -> Result<String, String> {
+    // Try index path first (pre-computed xrefs)
+    if let Some(result) = run_via_index(dir, focus) { return Ok(result); }
+    // Fallback: corpus scan with token_set matching
+    run_via_corpus(dir, focus)
+}
+
+fn matches_focus(name: &str, focus: Option<&str>) -> bool {
+    match focus {
+        None => true,
+        Some(pat) => glob_match(pat, name),
+    }
+}
+
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 { return text.contains(pattern); }
+    let mut pos = 0;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() { continue; }
+        if i == 0 {
+            if !text.starts_with(part) { return false; }
+            pos = part.len();
+        } else if i == parts.len() - 1 {
+            if !text[pos..].ends_with(part) { return false; }
+        } else {
+            match text[pos..].find(part) {
+                Some(idx) => pos += idx + part.len(),
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
+fn run_via_index(dir: &Path, focus: Option<&str>) -> Option<String> {
     crate::mcp::ensure_index_fresh(dir);
     crate::mcp::with_index(|data| {
         let topics = crate::binquery::topic_table(data).ok()?;
@@ -29,17 +65,20 @@ fn run_via_index(dir: &Path) -> Option<String> {
             topics.iter().find(|(i, _, _)| *i == id).map(|(_, n, _)| n.as_str()).unwrap_or("?")
         };
 
-        let mut sorted: Vec<(u16, usize)> = topics.iter().map(|(id, _, _)| {
-            let oc: usize = outgoing.get(id).map(|m| m.values().sum()).unwrap_or(0);
-            let ic: usize = incoming.get(id).map(|m| m.values().sum()).unwrap_or(0);
-            (*id, oc + ic)
-        }).collect();
+        let mut sorted: Vec<(u16, usize)> = topics.iter()
+            .filter(|(_, name, _)| matches_focus(name, focus))
+            .map(|(id, _, _)| {
+                let oc: usize = outgoing.get(id).map(|m| m.values().sum()).unwrap_or(0);
+                let ic: usize = incoming.get(id).map(|m| m.values().sum()).unwrap_or(0);
+                (*id, oc + ic)
+            }).collect();
         sorted.sort_by(|a, b| b.1.cmp(&a.1));
 
         let connected = sorted.iter().filter(|(_, c)| *c > 0).count();
         let mut out = String::new();
-        let _ = writeln!(out, "Topic dependency graph ({} topics, {} edges, {} connected):\n",
-            topics.len(), xrefs.len(), connected);
+        let focus_label = focus.map(|f| format!(" (focus: {f})")).unwrap_or_default();
+        let _ = writeln!(out, "Topic dependency graph ({} topics, {} edges, {} connected{}):\n",
+            sorted.len(), xrefs.len(), connected, focus_label);
 
         for (id, total) in &sorted {
             if *total == 0 { continue; }
@@ -64,7 +103,7 @@ fn run_via_index(dir: &Path) -> Option<String> {
     }).flatten()
 }
 
-fn run_via_corpus(dir: &Path) -> Result<String, String> {
+fn run_via_corpus(dir: &Path, focus: Option<&str>) -> Result<String, String> {
     crate::cache::with_corpus(dir, |entries| {
         let mut names_set = std::collections::BTreeSet::new();
         for e in entries { names_set.insert(e.topic.as_str()); }
@@ -90,18 +129,21 @@ fn run_via_corpus(dir: &Path) -> Result<String, String> {
             }
         }
 
-        let mut topics: Vec<(&str, usize)> = names.iter().map(|n| {
-            let oc: usize = outgoing.get(n).map(|m| m.values().sum()).unwrap_or(0);
-            let ic: usize = incoming.get(n).map(|m| m.values().sum()).unwrap_or(0);
-            (*n, oc + ic)
-        }).collect();
+        let mut topics: Vec<(&str, usize)> = names.iter()
+            .filter(|n| matches_focus(n, focus))
+            .map(|n| {
+                let oc: usize = outgoing.get(n).map(|m| m.values().sum()).unwrap_or(0);
+                let ic: usize = incoming.get(n).map(|m| m.values().sum()).unwrap_or(0);
+                (*n, oc + ic)
+            }).collect();
         topics.sort_by(|a, b| b.1.cmp(&a.1));
 
         let total_edges: usize = outgoing.values().map(|m| m.len()).sum();
         let connected = topics.iter().filter(|(_, c)| *c > 0).count();
         let mut out = String::new();
-        let _ = writeln!(out, "Topic dependency graph ({} topics, {} edges, {} connected):\n",
-            names.len(), total_edges, connected);
+        let focus_label = focus.map(|f| format!(" (focus: {f})")).unwrap_or_default();
+        let _ = writeln!(out, "Topic dependency graph ({} topics, {} edges, {} connected{}):\n",
+            topics.len(), total_edges, connected, focus_label);
 
         for (name, total) in &topics {
             if *total == 0 { continue; }

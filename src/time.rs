@@ -173,6 +173,24 @@ pub fn resolve_date_shortcut(s: &str) -> String {
     }
 }
 
+/// Convert "N days ago" or "N hours ago" to YYYY-MM-DD date string.
+pub fn relative_to_date(days: Option<u64>, hours: Option<u64>) -> Option<String> {
+    if let Some(h) = hours {
+        let now = LocalTime::now();
+        let now_min = now.to_days() * 1440 + now.hour as i64 * 60 + now.min as i64;
+        let target_min = now_min - h as i64 * 60;
+        let target_days = if target_min >= 0 { target_min / 1440 } else { target_min / 1440 - 1 };
+        let (y, m, d) = days_from_civil(target_days);
+        Some(format!("{y:04}-{m:02}-{d:02}"))
+    } else if let Some(d) = days {
+        let now = LocalTime::now();
+        let (y, m, day) = days_from_civil(now.to_days() - d as i64);
+        Some(format!("{y:04}-{m:02}-{day:02}"))
+    } else {
+        None
+    }
+}
+
 /// Howard Hinnant's days_from_civil algorithm.
 /// Returns days since 1970-01-01 for a given y/m/d.
 fn civil_to_days(y: i32, m: u32, d: u32) -> i64 {

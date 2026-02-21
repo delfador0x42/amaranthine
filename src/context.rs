@@ -2,12 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::Path;
 
-pub fn run(dir: &Path, query: Option<&str>, plain: bool) -> Result<String, String> {
-    run_inner(dir, query, plain, false)
-}
-
-pub fn run_brief(dir: &Path, query: Option<&str>, plain: bool) -> Result<String, String> {
-    run_inner(dir, query, plain, true)
+pub fn run_inner_pub(dir: &Path, query: Option<&str>, plain: bool, brief: bool) -> Result<String, String> {
+    run_inner(dir, query, plain, brief)
 }
 
 fn run_inner(dir: &Path, query: Option<&str>, plain: bool, brief: bool) -> Result<String, String> {

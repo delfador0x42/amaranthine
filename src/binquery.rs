@@ -546,7 +546,7 @@ pub fn read_header(data: &[u8]) -> Result<Header, String> {
     let hdr: Header = unsafe { std::ptr::read_unaligned(data.as_ptr() as *const Header) };
     if hdr.magic != MAGIC { return Err("bad index magic".into()); }
     let v = { hdr.version };
-    if v != VERSION { return Err(format!("index version {v} != {VERSION} — run rebuild_index")); }
+    if v != VERSION { return Err(format!("index version {v} != {VERSION} — run reindex")); }
     Ok(hdr)
 }
 

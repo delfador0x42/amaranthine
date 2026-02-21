@@ -33,6 +33,12 @@ pub fn run(dir: &Path) -> Result<(), String> {
 
     if std::env::var("AMARANTHINE_REEXEC").is_ok() {
         std::env::remove_var("AMARANTHINE_REEXEC");
+        // Self-audit: store binary UUID + git hash for crash correlation
+        if let Some(audit) = build_audit_entry() {
+            let _ = crate::store::run_full_ext(dir, "amaranthine-audit", &audit,
+                Some("system,reload"), true, None, None, None);
+            after_write(dir, "amaranthine-audit");
+        }
         let mut out = stdout.lock();
         let _ = writeln!(out, r#"{{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}}"#);
         let _ = out.flush();
@@ -356,4 +362,66 @@ pub(crate) fn ensure_index_fresh(dir: &Path) {
 }
 
 /// Pre-serialized initialize result — zero allocation, written directly to stdout.
-const INIT_RESULT: &str = r#"{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"amaranthine","version":"7.6.0"}}"#;
+const INIT_RESULT: &str = r#"{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"amaranthine","version":"9.0.0"}}"#;
+
+/// Build audit entry with binary UUID and git hash for crash correlation.
+fn build_audit_entry() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let data = std::fs::read(&exe).ok()?;
+    let uuid = parse_macho_uuid(&data)?;
+    let hash = read_git_hash().unwrap_or_default();
+    if hash.is_empty() {
+        Some(format!("_reload v8.0.0 UUID:{uuid}"))
+    } else {
+        Some(format!("_reload v8.0.0 UUID:{uuid} git:{hash}"))
+    }
+}
+
+/// Parse Mach-O binary to extract LC_UUID load command.
+/// Reads the 64-bit Mach-O header, iterates load commands to find cmd=0x1B (LC_UUID).
+fn parse_macho_uuid(data: &[u8]) -> Option<String> {
+    if data.len() < 32 { return None; }
+    let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    // MH_MAGIC_64 = 0xFEEDFACF
+    if magic != 0xFEEDFACF { return None; }
+    let ncmds = u32::from_le_bytes([data[16], data[17], data[18], data[19]]) as usize;
+    // Mach-O 64 header size = 32 bytes
+    let mut off = 32;
+    for _ in 0..ncmds {
+        if off + 8 > data.len() { break; }
+        let cmd = u32::from_le_bytes([data[off], data[off+1], data[off+2], data[off+3]]);
+        let cmdsize = u32::from_le_bytes([data[off+4], data[off+5], data[off+6], data[off+7]]) as usize;
+        if cmdsize < 8 { break; }
+        // LC_UUID = 0x1B, payload is 16 bytes at offset+8
+        if cmd == 0x1B && off + 24 <= data.len() {
+            let uuid = &data[off+8..off+24];
+            let mut s = String::with_capacity(36);
+            for (i, b) in uuid.iter().enumerate() {
+                if i == 4 || i == 6 || i == 8 || i == 10 { s.push('-'); }
+                s.push(char::from(b"0123456789ABCDEF"[(b >> 4) as usize]));
+                s.push(char::from(b"0123456789ABCDEF"[(b & 0xF) as usize]));
+            }
+            return Some(s);
+        }
+        off += cmdsize;
+    }
+    None
+}
+
+/// Read current git commit hash from the source repo.
+fn read_git_hash() -> Option<String> {
+    let src = std::env::var("AMARANTHINE_SRC").ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            std::path::PathBuf::from(home).join("wudan/dojo/crash3/amaranthine")
+        });
+    let head = std::fs::read_to_string(src.join(".git/HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(ref_path) = head.strip_prefix("ref: ") {
+        let hash = std::fs::read_to_string(src.join(".git").join(ref_path)).ok()?;
+        Some(hash.trim().chars().take(12).collect())
+    } else {
+        Some(head.chars().take(12).collect())
+    }
+}

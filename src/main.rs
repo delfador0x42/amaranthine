@@ -100,11 +100,7 @@ fn main() {
                 .filter(|a| *a != "--brief" && *a != "-b")
                 .map(|s| s.as_str()).collect();
             let q = if query_parts.is_empty() { None } else { Some(query_parts.join(" ")) };
-            if brief {
-                context::run_brief(&dir, q.as_deref(), plain)
-            } else {
-                context::run(&dir, q.as_deref(), plain)
-            }
+            context::run_inner_pub(&dir, q.as_deref(), plain, brief)
         }
         Some("delete") if cmd.len() >= 2 => {
             let last = cmd.iter().any(|a| a == "--last");
