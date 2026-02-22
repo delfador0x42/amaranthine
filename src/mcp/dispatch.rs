@@ -376,6 +376,45 @@ pub fn dispatch(name: &str, args: Option<&Value>, dir: &Path) -> Result<String, 
                     s.save(dir).ok();
                     Ok(format!("queued ({} pending)", s.pending_notes.len()))
                 }
+                "checkpoint" => {
+                    let task = arg_ref(args, "task");
+                    if task.is_empty() { return Err("task required for checkpoint".into()); }
+                    let mut cp = crate::session::Checkpoint::new(task);
+                    let done = arg_ref(args, "done");
+                    if !done.is_empty() {
+                        cp.done = done.split(';').map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty()).collect();
+                    }
+                    let next = arg_ref(args, "next");
+                    if !next.is_empty() {
+                        cp.next = next.split(';').map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty()).collect();
+                    }
+                    let hyp = arg_ref(args, "hypotheses");
+                    if !hyp.is_empty() {
+                        cp.hypotheses = hyp.split(';').map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty()).collect();
+                    }
+                    let blocked = arg_ref(args, "blocked");
+                    if !blocked.is_empty() { cp.blocked = blocked.to_string(); }
+                    let files = arg_ref(args, "files");
+                    if !files.is_empty() {
+                        cp.files = files.split(',').map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty()).collect();
+                    }
+                    cp.save(dir)?;
+                    Ok(format!("checkpoint saved: {task}"))
+                }
+                "resume" => {
+                    match crate::session::Checkpoint::load(dir) {
+                        Some(cp) => Ok(cp.format_resume()),
+                        None => Ok("no checkpoint found".into()),
+                    }
+                }
+                "clear_checkpoint" => {
+                    crate::session::Checkpoint::clear(dir);
+                    Ok("checkpoint cleared".into())
+                }
                 _ => {
                     // Default: show session state + store log
                     let mut out = String::with_capacity(512);
